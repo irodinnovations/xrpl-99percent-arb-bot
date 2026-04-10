@@ -1,0 +1,35 @@
+[Unit]
+Description=XRPL 99%+ Arbitrage Bot
+Documentation=https://github.com/youruser/xrpl-99percent-arb-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xrplbot
+Group=xrplbot
+WorkingDirectory=/opt/xrplbot
+EnvironmentFile=/opt/xrplbot/.env
+ExecStart=/opt/xrplbot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xrplbot
+
+# Resource limits (DEP-02) — safe for 1-core / 4GB VPS alongside OpenClaw Docker
+# CPUQuota=80% leaves ~20% headroom for OpenClaw and OS
+# MemoryMax=512M is well above bot's actual need (~100-150MB) but prevents runaway
+CPUQuota=80%
+MemoryMax=512M
+MemorySwapMax=0
+
+# Hardening — minimal privilege surface
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/xrplbot
+
+[Install]
+WantedBy=multi-user.target
