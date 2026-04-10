@@ -9,13 +9,13 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Core Bot Engine
 
-- [ ] **BOT-01**: Bot connects to XRPL mainnet via WebSocket and maintains persistent connection with auto-reconnect
+- [x] **BOT-01**: Bot connects to XRPL mainnet via WebSocket and maintains persistent connection with auto-reconnect
 - [ ] **BOT-02**: Bot scans for arbitrage opportunities using `ripple_path_find` (hybrid AMM + CLOB routing)
 - [ ] **BOT-03**: Profit calculation uses `decimal.Decimal` with formula: `((SimulatedOutput - Input) / Input) - NetworkFee - SlippageBuffer > 0.006`
 - [ ] **BOT-04**: SlippageBuffer base is 0.003 (0.3%), dynamically adjustable with 5-min volatility factor
 - [ ] **BOT-05**: Every candidate trade is validated via `simulate` RPC (live ledger dry-run) before submission
 - [ ] **BOT-06**: Only trades returning `tesSUCCESS` from simulation proceed to execution
-- [ ] **BOT-07**: Bot scans approximately once per ledger close (~3-5 seconds)
+- [x] **BOT-07**: Bot scans approximately once per ledger close (~3-5 seconds)
 
 ### Paper Trading (DRY_RUN)
 
@@ -112,13 +112,13 @@ Deferred to future release. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BOT-01 | Phase 1 | Pending |
+| BOT-01 | Phase 1 | Complete |
 | BOT-02 | Phase 1 | Pending |
 | BOT-03 | Phase 1 | Pending |
 | BOT-04 | Phase 1 | Pending |
 | BOT-05 | Phase 1 | Pending |
 | BOT-06 | Phase 1 | Pending |
-| BOT-07 | Phase 1 | Pending |
+| BOT-07 | Phase 1 | Complete |
 | DRY-01 | Phase 1 | Pending |
 | DRY-02 | Phase 1 | Pending |
 | DRY-03 | Phase 1 | Pending |
