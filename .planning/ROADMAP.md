@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Core Bot Engine** - Working bot that scans, simulates, and executes (or paper-trades) with full safety controls (completed 2026-04-10)
 - [x] **Phase 2: Backtester + AI Brain** - Historical replay backtesting and async Claude post-trade pattern analysis (completed 2026-04-10)
-- [ ] **Phase 3: Streamlit Dashboard** - Real-time read-only web dashboard fed from the shared JSONL log
+- [x] **Phase 3: Streamlit Dashboard** - Real-time read-only web dashboard fed from the shared JSONL log (completed 2026-04-10)
 - [ ] **Phase 4: Deployment** - systemd service, non-root user, .env.example, README, and Hostinger coexistence guide
 
 ## Phase Details
@@ -65,7 +65,7 @@ Plans:
 
 Plans:
 - [x] 03-01: Streamlit app — log reader, metrics calculations, auto-refresh, empty state handling
-- [ ] 03-02: Charts and table — Plotly histogram, recent opportunities data table, layout polish
+- [x] 03-02: Charts and table — Plotly histogram, recent opportunities data table, layout polish
 **UI hint**: yes
 
 ### Phase 4: Deployment
@@ -92,5 +92,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Core Bot Engine | 5/5 | Complete   | 2026-04-10 |
 | 2. Backtester + AI Brain | 2/2 | Complete   | 2026-04-10 |
-| 3. Streamlit Dashboard | 1/2 | In Progress|  |
+| 3. Streamlit Dashboard | 2/2 | Complete   | 2026-04-10 |
 | 4. Deployment | 0/2 | Not started | - |
