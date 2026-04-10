@@ -64,7 +64,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: Streamlit app — log reader, metrics calculations, auto-refresh, empty state handling
+- [x] 03-01: Streamlit app — log reader, metrics calculations, auto-refresh, empty state handling
 - [ ] 03-02: Charts and table — Plotly histogram, recent opportunities data table, layout polish
 **UI hint**: yes
 
@@ -92,5 +92,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Core Bot Engine | 5/5 | Complete   | 2026-04-10 |
 | 2. Backtester + AI Brain | 2/2 | Complete   | 2026-04-10 |
-| 3. Streamlit Dashboard | 0/2 | Not started | - |
+| 3. Streamlit Dashboard | 1/2 | In Progress|  |
 | 4. Deployment | 0/2 | Not started | - |

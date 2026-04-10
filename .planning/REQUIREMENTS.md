@@ -66,11 +66,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Streamlit Dashboard
 
-- [ ] **UI-01**: Real-time dashboard shows win rate, total opportunities, and average profit
+- [x] **UI-01**: Real-time dashboard shows win rate, total opportunities, and average profit
 - [ ] **UI-02**: Dashboard displays recent 20 opportunities in a data table
 - [ ] **UI-03**: Profit distribution histogram using Plotly
-- [ ] **UI-04**: Auto-refreshes every 5 seconds from `xrpl_arb_log.jsonl`
-- [ ] **UI-05**: Graceful empty state when no logs exist yet
+- [x] **UI-04**: Auto-refreshes every 5 seconds from `xrpl_arb_log.jsonl`
+- [x] **UI-05**: Graceful empty state when no logs exist yet
 
 ### Deployment & VPS
 
@@ -145,11 +145,11 @@ Deferred to future release. Tracked but not in current roadmap.
 | AI-02 | Phase 2 | Complete |
 | AI-03 | Phase 2 | Complete |
 | AI-04 | Phase 2 | Complete |
-| UI-01 | Phase 3 | Pending |
+| UI-01 | Phase 3 | Complete |
 | UI-02 | Phase 3 | Pending |
 | UI-03 | Phase 3 | Pending |
-| UI-04 | Phase 3 | Pending |
-| UI-05 | Phase 3 | Pending |
+| UI-04 | Phase 3 | Complete |
+| UI-05 | Phase 3 | Complete |
 | DEP-01 | Phase 4 | Pending |
 | DEP-02 | Phase 4 | Pending |
 | DEP-03 | Phase 4 | Pending |
