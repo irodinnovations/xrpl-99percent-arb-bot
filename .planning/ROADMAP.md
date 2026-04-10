@@ -46,7 +46,7 @@ Plans:
   1. Running `python backtest.py` produces a report showing win rate, total opportunities found, and average profit per opportunity
   2. After every paper trade, the bot fires an async Claude call and logs the AI response (suggestion, new_threshold recommendation, reasoning) without slowing ledger scanning
   3. Bot continues operating normally when ANTHROPIC_KEY is absent from .env
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 - [ ] 02-01: Backtesting module — historical ledger data replay, pathfinding replay, win rate and profit report
@@ -61,7 +61,7 @@ Plans:
   2. A table of the 20 most recent opportunities is visible with all relevant fields
   3. A Plotly profit distribution histogram renders correctly from real log data
   4. Dashboard shows a clean empty state message when xrpl_arb_log.jsonl does not exist yet
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 - [ ] 03-01: Streamlit app — log reader, metrics calculations, auto-refresh, empty state handling
@@ -77,7 +77,7 @@ Plans:
   2. The bot and OpenClaw Docker project run simultaneously on Hostinger KVM 1 without port conflicts or resource contention
   3. A new user can follow README alone — from SSH login through 7-day paper trading review to switching to live with 10-20 XRP
   4. .env.example documents every environment variable the bot reads, with inline explanations
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
 - [ ] 04-01: systemd service + user setup — xrplbot user creation, service file with resource limits, enable/start workflow
