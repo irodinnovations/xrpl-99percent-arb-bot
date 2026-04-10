@@ -22,15 +22,15 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **DRY-01**: `DRY_RUN=True` mode logs "would execute" trades without submitting transactions
 - [ ] **DRY-02**: Paper trading uses real mainnet ledger data and real `simulate` RPC results
 - [x] **DRY-03**: All paper trades are logged identically to live trades (with `dry_run: true` flag)
-- [ ] **DRY-04**: DRY_RUN mode is the default -- requires explicit change to go live
+- [x] **DRY-04**: DRY_RUN mode is the default -- requires explicit change to go live
 
 ### Circuit Breakers & Safety
 
-- [ ] **SAFE-01**: Max position size enforced at 5% of current account balance before simulation
-- [ ] **SAFE-02**: Daily loss circuit breaker at 2% of account -- bot pauses for 24 hours if hit
-- [ ] **SAFE-03**: Path/token blacklist prevents trading on known-bad or manipulated routes
-- [ ] **SAFE-04**: All financial math uses `decimal.Decimal` -- no floating point anywhere
-- [ ] **SAFE-05**: Wallet seed loaded from `.env` file only -- never hardcoded
+- [x] **SAFE-01**: Max position size enforced at 5% of current account balance before simulation
+- [x] **SAFE-02**: Daily loss circuit breaker at 2% of account -- bot pauses for 24 hours if hit
+- [x] **SAFE-03**: Path/token blacklist prevents trading on known-bad or manipulated routes
+- [x] **SAFE-04**: All financial math uses `decimal.Decimal` -- no floating point anywhere
+- [x] **SAFE-05**: Wallet seed loaded from `.env` file only -- never hardcoded
 
 ### Live Execution
 
@@ -122,12 +122,12 @@ Deferred to future release. Tracked but not in current roadmap.
 | DRY-01 | Phase 1 | Pending |
 | DRY-02 | Phase 1 | Pending |
 | DRY-03 | Phase 1 | Complete |
-| DRY-04 | Phase 1 | Pending |
-| SAFE-01 | Phase 1 | Pending |
-| SAFE-02 | Phase 1 | Pending |
-| SAFE-03 | Phase 1 | Pending |
-| SAFE-04 | Phase 1 | Pending |
-| SAFE-05 | Phase 1 | Pending |
+| DRY-04 | Phase 1 | Complete |
+| SAFE-01 | Phase 1 | Complete |
+| SAFE-02 | Phase 1 | Complete |
+| SAFE-03 | Phase 1 | Complete |
+| SAFE-04 | Phase 1 | Complete |
+| SAFE-05 | Phase 1 | Complete |
 | LIVE-01 | Phase 1 | Pending |
 | LIVE-02 | Phase 1 | Pending |
 | LIVE-03 | Phase 1 | Pending |
