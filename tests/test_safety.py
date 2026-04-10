@@ -2,7 +2,7 @@
 
 import pytest
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from src.safety import CircuitBreaker, Blacklist
 
@@ -41,7 +41,7 @@ class TestCircuitBreaker:
         assert cb.is_halted() is True
 
         # Simulate 24 hours passing
-        cb._halt_until = datetime.utcnow() - timedelta(hours=1)
+        cb._halt_until = datetime.now(timezone.utc) - timedelta(hours=1)
         assert cb.is_halted() is False
 
     def test_daily_pnl_is_decimal(self):
