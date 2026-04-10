@@ -31,6 +31,10 @@ NETWORK_FEE: Decimal = Decimal("0.000012")  # ~12 drops, standard XRPL fee
 TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# AI Brain (optional — AI-04)
+ANTHROPIC_KEY: str = os.getenv("ANTHROPIC_KEY", "")
+AI_REVIEWS_FILE: str = os.getenv("AI_REVIEWS_FILE", "ai_reviews.jsonl")
+
 # Logging
 LOG_FILE: str = os.getenv("LOG_FILE", "xrpl_arb_log.jsonl")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
