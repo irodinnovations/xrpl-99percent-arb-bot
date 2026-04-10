@@ -36,7 +36,7 @@ Plans:
 - [ ] 01-02: Pathfinder + profit math — ripple_path_find integration, Decimal profit formula, slippage buffer, position sizing
 - [ ] 01-03: Simulation gate + execution — simulate RPC validation, DRY_RUN mode, autofill_and_sign live path, post-trade validation
 - [ ] 01-04: Safety systems — circuit breakers, blacklist, SAFE-04 Decimal enforcement, SAFE-05 .env seed loading
-- [ ] 01-05: Telegram + logging — alert formatting, JSONL log writer, console logging
+- [x] 01-05: Telegram + logging — alert formatting, JSONL log writer, console logging
 
 ### Phase 2: Backtester + AI Brain
 **Goal**: Historical data can be replayed to measure strategy win rate, and every executed trade (paper or live) gets an async Claude review that suggests threshold adjustments without blocking the main loop

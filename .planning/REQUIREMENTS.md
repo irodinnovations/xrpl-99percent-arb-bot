@@ -21,7 +21,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **DRY-01**: `DRY_RUN=True` mode logs "would execute" trades without submitting transactions
 - [ ] **DRY-02**: Paper trading uses real mainnet ledger data and real `simulate` RPC results
-- [ ] **DRY-03**: All paper trades are logged identically to live trades (with `dry_run: true` flag)
+- [x] **DRY-03**: All paper trades are logged identically to live trades (with `dry_run: true` flag)
 - [ ] **DRY-04**: DRY_RUN mode is the default -- requires explicit change to go live
 
 ### Circuit Breakers & Safety
@@ -40,16 +40,16 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Telegram Alerts
 
-- [ ] **TELE-01**: Telegram bot sends alert on every opportunity detected (paper or live)
-- [ ] **TELE-02**: Alerts include profit percentage, input/output amounts, and trade mode
-- [ ] **TELE-03**: Telegram credentials loaded from `.env` -- bot works without Telegram configured (graceful skip)
+- [x] **TELE-01**: Telegram bot sends alert on every opportunity detected (paper or live)
+- [x] **TELE-02**: Alerts include profit percentage, input/output amounts, and trade mode
+- [x] **TELE-03**: Telegram credentials loaded from `.env` -- bot works without Telegram configured (graceful skip)
 
 ### Logging
 
-- [ ] **LOG-01**: All trades logged to `xrpl_arb_log.jsonl` in append-only JSON Lines format
-- [ ] **LOG-02**: Each log entry includes: timestamp, profit_pct, input_xrp, simulated_output, dry_run flag, and hash (if live)
-- [ ] **LOG-03**: Console logging uses Python standard logging with timestamps and levels
-- [ ] **LOG-04**: Log file is shared between bot and Streamlit dashboard
+- [x] **LOG-01**: All trades logged to `xrpl_arb_log.jsonl` in append-only JSON Lines format
+- [x] **LOG-02**: Each log entry includes: timestamp, profit_pct, input_xrp, simulated_output, dry_run flag, and hash (if live)
+- [x] **LOG-03**: Console logging uses Python standard logging with timestamps and levels
+- [x] **LOG-04**: Log file is shared between bot and Streamlit dashboard
 
 ### Backtesting
 
@@ -121,7 +121,7 @@ Deferred to future release. Tracked but not in current roadmap.
 | BOT-07 | Phase 1 | Complete |
 | DRY-01 | Phase 1 | Pending |
 | DRY-02 | Phase 1 | Pending |
-| DRY-03 | Phase 1 | Pending |
+| DRY-03 | Phase 1 | Complete |
 | DRY-04 | Phase 1 | Pending |
 | SAFE-01 | Phase 1 | Pending |
 | SAFE-02 | Phase 1 | Pending |
@@ -131,13 +131,13 @@ Deferred to future release. Tracked but not in current roadmap.
 | LIVE-01 | Phase 1 | Pending |
 | LIVE-02 | Phase 1 | Pending |
 | LIVE-03 | Phase 1 | Pending |
-| TELE-01 | Phase 1 | Pending |
-| TELE-02 | Phase 1 | Pending |
-| TELE-03 | Phase 1 | Pending |
-| LOG-01 | Phase 1 | Pending |
-| LOG-02 | Phase 1 | Pending |
-| LOG-03 | Phase 1 | Pending |
-| LOG-04 | Phase 1 | Pending |
+| TELE-01 | Phase 1 | Complete |
+| TELE-02 | Phase 1 | Complete |
+| TELE-03 | Phase 1 | Complete |
+| LOG-01 | Phase 1 | Complete |
+| LOG-02 | Phase 1 | Complete |
+| LOG-03 | Phase 1 | Complete |
+| LOG-04 | Phase 1 | Complete |
 | BACK-01 | Phase 2 | Pending |
 | BACK-02 | Phase 2 | Pending |
 | BACK-03 | Phase 2 | Pending |
