@@ -29,7 +29,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. No trade proceeds to execution (paper or live) unless simulate RPC returns tesSUCCESS
   4. Bot sends a Telegram alert when an opportunity is detected, including profit percentage and amounts
   5. Bot halts scanning for 24 hours if cumulative daily loss reaches 2% of account balance
-**Plans**: TBD
+**Plans**: 5 plans
 
 Plans:
 - [ ] 01-01: XRPL connection layer — WebSocket client with auto-reconnect and ledger-close stream
