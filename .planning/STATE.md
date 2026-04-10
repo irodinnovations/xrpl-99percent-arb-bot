@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-core-bot-engine/01-03-PLAN.md
-last_updated: "2026-04-10T16:38:18.856Z"
-last_activity: 2026-04-10 -- Phase 02 execution started
+stopped_at: Completed 02-backtester-ai-brain/02-01-PLAN.md
+last_updated: "2026-04-10T16:45:28.432Z"
+last_activity: 2026-04-10
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 7
-  completed_plans: 5
-  percent: 71
+  completed_plans: 6
+  percent: 86
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 02 (Backtester + AI Brain) — EXECUTING
-Plan: 1 of 2
-Status: Executing Phase 02
-Last activity: 2026-04-10 -- Phase 02 execution started
+Plan: 2 of 2
+Status: Ready to execute
+Last activity: 2026-04-10
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-core-bot-engine P02 | 3m | 2 tasks | 4 files |
 | Phase 01-core-bot-engine P04 | 3m | 1 tasks | 2 files |
 | Phase 01-core-bot-engine P03 | 20m | 2 tasks | 5 files |
+| Phase 02-backtester-ai-brain P01 | 12m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,9 @@ Recent decisions affecting current work:
 - [Phase 01-core-bot-engine]: HttpRpcClient used for simulate calls — xrpl-py JsonRpcClient model validation rejects cross-currency Payment tx dicts before reaching the network
 - [Phase 01-core-bot-engine]: Raw tx_dict built directly in executor bypassing Payment model — xrpl-py disallows same-account XRP-to-XRP with paths, but XRPL network allows cross-currency IOU-routed payments
 - [Phase 01-core-bot-engine]: TF_PARTIAL_PAYMENT flag (131072) required on XRP-loop path payments where both amount and send_max are XRP
+- [Phase 02-backtester-ai-brain]: Decimal(str(value)) used in _parse_decimal() at JSONL boundary — prevents float contamination from log values
+- [Phase 02-backtester-ai-brain]: profit_ratio field used to determine win/loss in compute_report — profit_pct can round near-zero values ambiguously
+- [Phase 02-backtester-ai-brain]: per-line try/except json.JSONDecodeError in load_trades() skips malformed entries without crashing — mitigates T-02-01
 
 ### Pending Todos
 
@@ -89,6 +93,6 @@ None yet. Key constraint to keep in mind: VPS is 1 CPU / 4GB RAM — bot must st
 
 ## Session Continuity
 
-Last session: 2026-04-10T16:01:40.203Z
-Stopped at: Completed 01-core-bot-engine/01-03-PLAN.md
+Last session: 2026-04-10T16:45:28.427Z
+Stopped at: Completed 02-backtester-ai-brain/02-01-PLAN.md
 Resume file: None

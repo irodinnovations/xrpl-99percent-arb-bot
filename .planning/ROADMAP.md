@@ -49,7 +49,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Backtesting module — historical ledger data replay, pathfinding replay, win rate and profit report
+- [x] 02-01: Backtesting module — historical ledger data replay, pathfinding replay, win rate and profit report
 - [ ] 02-02: AI brain integration — async Claude API call after each trade, structured JSON response parsing, optional/graceful-skip behavior
 
 ### Phase 3: Streamlit Dashboard

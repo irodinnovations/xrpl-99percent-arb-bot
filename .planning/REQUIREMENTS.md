@@ -53,9 +53,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Backtesting
 
-- [ ] **BACK-01**: Backtesting module replays pathfinding logic against historical ledger data
-- [ ] **BACK-02**: Backtest reports win rate, total opportunities, and average profit per opportunity
-- [ ] **BACK-03**: Backtest is runnable standalone via `python backtest.py`
+- [x] **BACK-01**: Backtesting module replays pathfinding logic against historical ledger data
+- [x] **BACK-02**: Backtest reports win rate, total opportunities, and average profit per opportunity
+- [x] **BACK-03**: Backtest is runnable standalone via `python backtest.py`
 
 ### AI Brain
 
@@ -138,9 +138,9 @@ Deferred to future release. Tracked but not in current roadmap.
 | LOG-02 | Phase 1 | Complete |
 | LOG-03 | Phase 1 | Complete |
 | LOG-04 | Phase 1 | Complete |
-| BACK-01 | Phase 2 | Pending |
-| BACK-02 | Phase 2 | Pending |
-| BACK-03 | Phase 2 | Pending |
+| BACK-01 | Phase 2 | Complete |
+| BACK-02 | Phase 2 | Complete |
+| BACK-03 | Phase 2 | Complete |
 | AI-01 | Phase 2 | Pending |
 | AI-02 | Phase 2 | Pending |
 | AI-03 | Phase 2 | Pending |
