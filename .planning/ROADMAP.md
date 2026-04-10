@@ -13,7 +13,7 @@ Four phases take this project from zero to a live VPS-deployed arbitrage bot. Ph
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Core Bot Engine** - Working bot that scans, simulates, and executes (or paper-trades) with full safety controls (completed 2026-04-10)
-- [ ] **Phase 2: Backtester + AI Brain** - Historical replay backtesting and async Claude post-trade pattern analysis
+- [x] **Phase 2: Backtester + AI Brain** - Historical replay backtesting and async Claude post-trade pattern analysis (completed 2026-04-10)
 - [ ] **Phase 3: Streamlit Dashboard** - Real-time read-only web dashboard fed from the shared JSONL log
 - [ ] **Phase 4: Deployment** - systemd service, non-root user, .env.example, README, and Hostinger coexistence guide
 
@@ -50,7 +50,7 @@ Plans:
 
 Plans:
 - [x] 02-01: Backtesting module — historical ledger data replay, pathfinding replay, win rate and profit report
-- [ ] 02-02: AI brain integration — async Claude API call after each trade, structured JSON response parsing, optional/graceful-skip behavior
+- [x] 02-02: AI brain integration — async Claude API call after each trade, structured JSON response parsing, optional/graceful-skip behavior
 
 ### Phase 3: Streamlit Dashboard
 **Goal**: A browser-based read-only dashboard auto-refreshes from the shared JSONL log and shows the bot's live win rate, recent opportunities, and profit distribution
@@ -91,6 +91,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Core Bot Engine | 5/5 | Complete   | 2026-04-10 |
-| 2. Backtester + AI Brain | 0/2 | Not started | - |
+| 2. Backtester + AI Brain | 2/2 | Complete   | 2026-04-10 |
 | 3. Streamlit Dashboard | 0/2 | Not started | - |
 | 4. Deployment | 0/2 | Not started | - |

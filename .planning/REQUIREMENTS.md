@@ -59,10 +59,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### AI Brain
 
-- [ ] **AI-01**: Async Claude API review runs after every trade (paper or live) -- never blocks main loop
-- [ ] **AI-02**: AI receives current trade data plus last 50 trades for pattern analysis
-- [ ] **AI-03**: AI returns structured JSON: suggestion, new_threshold recommendation, and reasoning
-- [ ] **AI-04**: AI brain is optional -- bot works fully without ANTHROPIC_KEY configured
+- [x] **AI-01**: Async Claude API review runs after every trade (paper or live) -- never blocks main loop
+- [x] **AI-02**: AI receives current trade data plus last 50 trades for pattern analysis
+- [x] **AI-03**: AI returns structured JSON: suggestion, new_threshold recommendation, and reasoning
+- [x] **AI-04**: AI brain is optional -- bot works fully without ANTHROPIC_KEY configured
 
 ### Streamlit Dashboard
 
@@ -141,10 +141,10 @@ Deferred to future release. Tracked but not in current roadmap.
 | BACK-01 | Phase 2 | Complete |
 | BACK-02 | Phase 2 | Complete |
 | BACK-03 | Phase 2 | Complete |
-| AI-01 | Phase 2 | Pending |
-| AI-02 | Phase 2 | Pending |
-| AI-03 | Phase 2 | Pending |
-| AI-04 | Phase 2 | Pending |
+| AI-01 | Phase 2 | Complete |
+| AI-02 | Phase 2 | Complete |
+| AI-03 | Phase 2 | Complete |
+| AI-04 | Phase 2 | Complete |
 | UI-01 | Phase 3 | Pending |
 | UI-02 | Phase 3 | Pending |
 | UI-03 | Phase 3 | Pending |
