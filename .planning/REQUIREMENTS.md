@@ -13,14 +13,14 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **BOT-02**: Bot scans for arbitrage opportunities using `ripple_path_find` (hybrid AMM + CLOB routing)
 - [x] **BOT-03**: Profit calculation uses `decimal.Decimal` with formula: `((SimulatedOutput - Input) / Input) - NetworkFee - SlippageBuffer > 0.006`
 - [x] **BOT-04**: SlippageBuffer base is 0.003 (0.3%), dynamically adjustable with 5-min volatility factor
-- [ ] **BOT-05**: Every candidate trade is validated via `simulate` RPC (live ledger dry-run) before submission
-- [ ] **BOT-06**: Only trades returning `tesSUCCESS` from simulation proceed to execution
+- [x] **BOT-05**: Every candidate trade is validated via `simulate` RPC (live ledger dry-run) before submission
+- [x] **BOT-06**: Only trades returning `tesSUCCESS` from simulation proceed to execution
 - [x] **BOT-07**: Bot scans approximately once per ledger close (~3-5 seconds)
 
 ### Paper Trading (DRY_RUN)
 
-- [ ] **DRY-01**: `DRY_RUN=True` mode logs "would execute" trades without submitting transactions
-- [ ] **DRY-02**: Paper trading uses real mainnet ledger data and real `simulate` RPC results
+- [x] **DRY-01**: `DRY_RUN=True` mode logs "would execute" trades without submitting transactions
+- [x] **DRY-02**: Paper trading uses real mainnet ledger data and real `simulate` RPC results
 - [x] **DRY-03**: All paper trades are logged identically to live trades (with `dry_run: true` flag)
 - [x] **DRY-04**: DRY_RUN mode is the default -- requires explicit change to go live
 
@@ -34,9 +34,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Live Execution
 
-- [ ] **LIVE-01**: Live trades use `autofill_and_sign` then `sign_and_submit` via xrpl-py
-- [ ] **LIVE-02**: Post-trade validation confirms on-ledger result matches simulation expectation
-- [ ] **LIVE-03**: Failed live submissions are logged with full error details
+- [x] **LIVE-01**: Live trades use `autofill_and_sign` then `sign_and_submit` via xrpl-py
+- [x] **LIVE-02**: Post-trade validation confirms on-ledger result matches simulation expectation
+- [x] **LIVE-03**: Failed live submissions are logged with full error details
 
 ### Telegram Alerts
 
@@ -116,11 +116,11 @@ Deferred to future release. Tracked but not in current roadmap.
 | BOT-02 | Phase 1 | Complete |
 | BOT-03 | Phase 1 | Complete |
 | BOT-04 | Phase 1 | Complete |
-| BOT-05 | Phase 1 | Pending |
-| BOT-06 | Phase 1 | Pending |
+| BOT-05 | Phase 1 | Complete |
+| BOT-06 | Phase 1 | Complete |
 | BOT-07 | Phase 1 | Complete |
-| DRY-01 | Phase 1 | Pending |
-| DRY-02 | Phase 1 | Pending |
+| DRY-01 | Phase 1 | Complete |
+| DRY-02 | Phase 1 | Complete |
 | DRY-03 | Phase 1 | Complete |
 | DRY-04 | Phase 1 | Complete |
 | SAFE-01 | Phase 1 | Complete |
@@ -128,9 +128,9 @@ Deferred to future release. Tracked but not in current roadmap.
 | SAFE-03 | Phase 1 | Complete |
 | SAFE-04 | Phase 1 | Complete |
 | SAFE-05 | Phase 1 | Complete |
-| LIVE-01 | Phase 1 | Pending |
-| LIVE-02 | Phase 1 | Pending |
-| LIVE-03 | Phase 1 | Pending |
+| LIVE-01 | Phase 1 | Complete |
+| LIVE-02 | Phase 1 | Complete |
+| LIVE-03 | Phase 1 | Complete |
 | TELE-01 | Phase 1 | Complete |
 | TELE-02 | Phase 1 | Complete |
 | TELE-03 | Phase 1 | Complete |

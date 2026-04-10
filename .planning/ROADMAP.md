@@ -12,7 +12,7 @@ Four phases take this project from zero to a live VPS-deployed arbitrage bot. Ph
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Core Bot Engine** - Working bot that scans, simulates, and executes (or paper-trades) with full safety controls
+- [x] **Phase 1: Core Bot Engine** - Working bot that scans, simulates, and executes (or paper-trades) with full safety controls (completed 2026-04-10)
 - [ ] **Phase 2: Backtester + AI Brain** - Historical replay backtesting and async Claude post-trade pattern analysis
 - [ ] **Phase 3: Streamlit Dashboard** - Real-time read-only web dashboard fed from the shared JSONL log
 - [ ] **Phase 4: Deployment** - systemd service, non-root user, .env.example, README, and Hostinger coexistence guide
@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01: XRPL connection layer — WebSocket client with auto-reconnect and ledger-close stream
 - [x] 01-02: Pathfinder + profit math — ripple_path_find integration, Decimal profit formula, slippage buffer, position sizing
-- [ ] 01-03: Simulation gate + execution — simulate RPC validation, DRY_RUN mode, autofill_and_sign live path, post-trade validation
+- [x] 01-03: Simulation gate + execution — simulate RPC validation, DRY_RUN mode, autofill_and_sign live path, post-trade validation
 - [x] 01-04: Safety systems — circuit breakers, blacklist, SAFE-04 Decimal enforcement, SAFE-05 .env seed loading
 - [x] 01-05: Telegram + logging — alert formatting, JSONL log writer, console logging
 
@@ -90,7 +90,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Core Bot Engine | 4/5 | In Progress|  |
+| 1. Core Bot Engine | 5/5 | Complete   | 2026-04-10 |
 | 2. Backtester + AI Brain | 0/2 | Not started | - |
 | 3. Streamlit Dashboard | 0/2 | Not started | - |
 | 4. Deployment | 0/2 | Not started | - |

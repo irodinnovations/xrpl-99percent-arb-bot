@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 01-core-bot-engine/01-04-PLAN.md
-last_updated: "2026-04-10T15:50:42.723Z"
+status: verifying
+stopped_at: Completed 01-core-bot-engine/01-03-PLAN.md
+last_updated: "2026-04-10T16:01:40.206Z"
 last_activity: 2026-04-10
 progress:
   total_phases: 4
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 4
-  percent: 80
+  completed_plans: 5
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 
 Phase: 01 (core-bot-engine) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-10
 
 Progress: [░░░░░░░░░░] 0%
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-core-bot-engine P05 | 3m | 2 tasks | 4 files |
 | Phase 01-core-bot-engine P02 | 3m | 2 tasks | 4 files |
 | Phase 01-core-bot-engine P04 | 3m | 1 tasks | 2 files |
+| Phase 01-core-bot-engine P03 | 20m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Recent decisions affecting current work:
 - [Phase 01-core-bot-engine]: is_profitable uses strictly-greater-than threshold — exact-threshold trades have zero safety margin
 - [Phase 01-core-bot-engine]: datetime.now(timezone.utc) used instead of deprecated datetime.utcnow() for Python 3.14 compatibility
 - [Phase 01-core-bot-engine]: CircuitBreaker halt check is separate from record_trade — is_halted() must be called explicitly by the scanner loop
+- [Phase 01-core-bot-engine]: HttpRpcClient used for simulate calls — xrpl-py JsonRpcClient model validation rejects cross-currency Payment tx dicts before reaching the network
+- [Phase 01-core-bot-engine]: Raw tx_dict built directly in executor bypassing Payment model — xrpl-py disallows same-account XRP-to-XRP with paths, but XRPL network allows cross-currency IOU-routed payments
+- [Phase 01-core-bot-engine]: TF_PARTIAL_PAYMENT flag (131072) required on XRP-loop path payments where both amount and send_max are XRP
 
 ### Pending Todos
 
@@ -85,6 +89,6 @@ None yet. Key constraint to keep in mind: VPS is 1 CPU / 4GB RAM — bot must st
 
 ## Session Continuity
 
-Last session: 2026-04-10T15:50:42.718Z
-Stopped at: Completed 01-core-bot-engine/01-04-PLAN.md
+Last session: 2026-04-10T16:01:40.203Z
+Stopped at: Completed 01-core-bot-engine/01-03-PLAN.md
 Resume file: None
