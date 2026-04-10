@@ -76,11 +76,11 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **DEP-01**: systemd service file runs bot as `xrplbot` non-root user with `Restart=always`
 - [x] **DEP-02**: Service file includes resource limits appropriate for 1-core / 4GB VPS
-- [ ] **DEP-03**: `.env.example` documents all required and optional environment variables
-- [ ] **DEP-04**: README includes complete Hostinger-specific deployment guide (SSH, user creation, package install, service setup)
+- [x] **DEP-03**: `.env.example` documents all required and optional environment variables
+- [x] **DEP-04**: README includes complete Hostinger-specific deployment guide (SSH, user creation, package install, service setup)
 - [x] **DEP-05**: Deployment instructions ensure coexistence with OpenClaw Docker project
-- [ ] **DEP-06**: README includes 7-day paper-trading review criteria checklist
-- [ ] **DEP-07**: README includes instructions to switch from paper to live with minimal capital (10-20 XRP)
+- [x] **DEP-06**: README includes 7-day paper-trading review criteria checklist
+- [x] **DEP-07**: README includes instructions to switch from paper to live with minimal capital (10-20 XRP)
 
 ## v2 Requirements
 
@@ -152,11 +152,11 @@ Deferred to future release. Tracked but not in current roadmap.
 | UI-05 | Phase 3 | Complete |
 | DEP-01 | Phase 4 | Complete |
 | DEP-02 | Phase 4 | Complete |
-| DEP-03 | Phase 4 | Pending |
-| DEP-04 | Phase 4 | Pending |
+| DEP-03 | Phase 4 | Complete |
+| DEP-04 | Phase 4 | Complete |
 | DEP-05 | Phase 4 | Complete |
-| DEP-06 | Phase 4 | Pending |
-| DEP-07 | Phase 4 | Pending |
+| DEP-06 | Phase 4 | Complete |
+| DEP-07 | Phase 4 | Complete |
 
 **Coverage:**
 - v1 requirements: 42 total

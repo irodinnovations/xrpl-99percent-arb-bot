@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 04-deployment/04-01-PLAN.md
-last_updated: "2026-04-10T17:35:15.820Z"
+status: verifying
+stopped_at: Completed 04-deployment/04-02-PLAN.md
+last_updated: "2026-04-10T17:46:55.095Z"
 last_activity: 2026-04-10
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 11
-  completed_plans: 10
-  percent: 91
+  completed_plans: 11
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 
 Phase: 04 (Deployment) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-10
 
 Progress: [░░░░░░░░░░] 0%
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-streamlit-dashboard P01 | 1m | 2 tasks | 2 files |
 | Phase 03-streamlit-dashboard P02 | 5m | 2 tasks | 2 files |
 | Phase 04-deployment P01 | 4m | 2 tasks | 2 files |
+| Phase 04-deployment P02 | 8m | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,9 @@ Recent decisions affecting current work:
 - [Phase 04-deployment]: CPUQuota=80% + MemoryMax=512M chosen for OpenClaw coexistence on 1-core/4GB VPS (DEP-05)
 - [Phase 04-deployment]: EnvironmentFile pattern for .env secrets keeps credentials out of process list (T-04-02)
 - [Phase 04-deployment]: xrplbot system user with nologin shell and NoNewPrivileges=true prevents privilege escalation (T-04-01)
+- [Phase 04-deployment]: README uses plain language throughout - target reader is a non-developer who vibe-codes
+- [Phase 04-deployment]: 7-day paper trading checklist has exactly 10 items with verifiable journalctl/wc commands for each
+- [Phase 04-deployment]: Live switchover gated behind explicit 10-item prerequisites checklist to prevent casual DRY_RUN=False activation
 
 ### Pending Todos
 
@@ -110,6 +114,6 @@ None yet. Key constraint to keep in mind: VPS is 1 CPU / 4GB RAM — bot must st
 
 ## Session Continuity
 
-Last session: 2026-04-10T17:35:15.818Z
-Stopped at: Completed 04-deployment/04-01-PLAN.md
+Last session: 2026-04-10T17:46:55.090Z
+Stopped at: Completed 04-deployment/04-02-PLAN.md
 Resume file: None
