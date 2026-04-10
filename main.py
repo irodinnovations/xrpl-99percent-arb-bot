@@ -29,6 +29,7 @@ from src.executor import TradeExecutor
 from src.safety import CircuitBreaker, Blacklist
 from src.trade_logger import setup_logging
 from src.telegram_alerts import send_alert
+from src.ai_brain import review_trade
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,17 @@ async def main():
                     f"Opportunity: {opp.profit_pct:.4f}% profit | "
                     f"In: {opp.input_xrp} XRP -> Out: {opp.output_xrp} XRP"
                 )
-                await executor.execute(opp)
+                result = await executor.execute(opp)
+                if result:
+                    # Fire-and-forget AI review — never blocks scanning (AI-01)
+                    trade_review_data = {
+                        "profit_pct": str(opp.profit_pct),
+                        "profit_ratio": str(opp.profit_ratio),
+                        "input_xrp": str(opp.input_xrp),
+                        "output_xrp": str(opp.output_xrp),
+                        "dry_run": DRY_RUN,
+                    }
+                    asyncio.create_task(review_trade(trade_review_data))
 
             # Heartbeat log every ~50 ledgers (~3 minutes at 3-5s per ledger)
             if scan_count % 50 == 0:
