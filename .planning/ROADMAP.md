@@ -80,7 +80,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: systemd service + user setup — xrplbot user creation, service file with resource limits, enable/start workflow
+- [x] 04-01: systemd service + user setup — xrplbot user creation, service file with resource limits, enable/start workflow
 - [ ] 04-02: .env.example + README — all env vars documented, Hostinger deployment guide, OpenClaw coexistence notes, 7-day paper review checklist, live-trading switchover instructions
 
 ## Progress
@@ -93,4 +93,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Core Bot Engine | 5/5 | Complete   | 2026-04-10 |
 | 2. Backtester + AI Brain | 2/2 | Complete   | 2026-04-10 |
 | 3. Streamlit Dashboard | 2/2 | Complete   | 2026-04-10 |
-| 4. Deployment | 0/2 | Not started | - |
+| 4. Deployment | 1/2 | In Progress|  |
