@@ -1,6 +1,8 @@
 """XRPL Arbitrage Bot — Streamlit live dashboard.
 
 UI-01: Three KPI metric cards (Win Rate, Total Opportunities, Average Profit).
+UI-02: Recent opportunities table — last 20 trades, newest first.
+UI-03: Profit distribution bar chart using BacktestReport.profit_buckets.
 UI-04: Auto-refresh every 5 seconds via st.rerun().
 UI-05: Empty state message when no log data exists.
 
@@ -11,6 +13,8 @@ Run with:
 import time
 from datetime import datetime
 
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from src.backtester import BacktestEngine, compute_report
@@ -59,14 +63,50 @@ def render_dashboard() -> None:
     with col3:
         st.metric("Average Profit", f"{report.avg_profit:.4f}%")
 
-    # Placeholder sections — Plan 02 will fill these in.
+    # Recent trades table (UI-02) — last 20, newest first (per D-1 layout).
     st.divider()
     st.subheader("Recent Opportunities")
-    st.info("Table coming in plan 02")
 
+    # Build recent trades DataFrame — slice last 20, reverse to newest-first.
+    recent = trades[-20:][::-1]
+
+    TABLE_COLUMNS = ["timestamp", "profit_pct", "input_xrp", "output_xrp", "dry_run", "simulation_result"]
+
+    rows = []
+    for t in recent:
+        rows.append({col: t.get(col, "") for col in TABLE_COLUMNS})
+
+    df = pd.DataFrame(rows, columns=TABLE_COLUMNS)
+
+    # Format profit_pct to 4 decimal places for readability (T-03-05 mitigated via float()).
+    if "profit_pct" in df.columns and not df.empty:
+        df["profit_pct"] = df["profit_pct"].apply(
+            lambda v: f"{float(v):.4f}" if v != "" else ""
+        )
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Profit distribution bar chart (UI-03) — same bucket labels as BacktestReport.
     st.divider()
     st.subheader("Profit Distribution")
-    st.info("Chart coming in plan 02")
+
+    # Fixed bucket order (D-5 decision) — never sort alphabetically.
+    BUCKET_ORDER = ["<0", "0.0-0.5", "0.5-1.0", "1.0-2.0", "2.0+"]
+    counts = [report.profit_buckets.get(label, 0) for label in BUCKET_ORDER]
+
+    fig = px.bar(
+        x=BUCKET_ORDER,
+        y=counts,
+        labels={"x": "Profit Range (%)", "y": "Trade Count"},
+        title="Profit Distribution",
+        color_discrete_sequence=["#00CC96"],  # green bars, readable on dark theme
+    )
+    fig.update_layout(
+        xaxis={"categoryorder": "array", "categoryarray": BUCKET_ORDER},
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # Auto-refresh loop (D-3 decision: native st.rerun(), no external library).
