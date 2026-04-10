@@ -1,0 +1,14 @@
+# Streamlit configuration for XRPL Arbitrage Bot dashboard.
+#
+# Port override at runtime:
+#   STREAMLIT_SERVER_PORT=8502 streamlit run src/dashboard.py
+#   Or via CLI: streamlit run src/dashboard.py --server.port 8502
+#
+# Note: STREAMLIT_PORT (D-7 decision) maps to Streamlit's STREAMLIT_SERVER_PORT env var.
+
+[theme]
+base = "dark"
+
+[server]
+port = 8501
+headless = true
