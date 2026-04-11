@@ -19,12 +19,11 @@ import logging
 from decimal import Decimal
 from typing import Optional
 
-from xrpl.clients import JsonRpcClient
-from xrpl.core.binarycodec import encode as xrpl_encode
+from xrpl.core.binarycodec import encode as xrpl_encode, encode_for_signing
 from xrpl.core.keypairs import sign as keypairs_sign
 from xrpl.wallet import Wallet
 
-from src.config import XRPL_SECRET, XRPL_RPC_URL, DRY_RUN
+from src.config import XRPL_RPC_URL, DRY_RUN
 from src.pathfinder import Opportunity
 from src.simulator import simulate_transaction, SimResult, HttpRpcClient
 from src.safety import CircuitBreaker, Blacklist
@@ -138,33 +137,42 @@ class TradeExecutor:
             await log_trade(trade_data)
             return True
 
-        # LIVE EXECUTION — autofill, sign, submit via JSON-RPC
+        # LIVE EXECUTION — client-side autofill, sign, submit via JSON-RPC
+        # Wallet seed never leaves this process (T-01-10).
         try:
-            # Step 1: autofill (fetch Sequence, Fee, LastLedgerSequence from node)
-            autofill_payload = {
-                "method": "sign",
-                "params": [{
-                    "tx_json": tx_dict,
-                    "secret": self.wallet.seed,
-                    "fee_mult_max": 1000,
-                }],
+            # Step 1: Autofill — fetch Sequence and current ledger from node
+            account_info_payload = {
+                "method": "account_info",
+                "params": [{"account": self.wallet.address, "ledger_index": "current"}],
             }
-            autofill_response = await asyncio.to_thread(
-                self.rpc_client.request, autofill_payload
+            account_info_response = await asyncio.to_thread(
+                self.rpc_client.request, account_info_payload
             )
-            autofill_result = autofill_response.get("result", {})
+            acct_result = account_info_response.get("result", {})
 
-            if autofill_result.get("status") != "success":
-                err = autofill_result.get("error_message", str(autofill_result))
-                logger.error(f"Autofill/sign failed: {err}")
+            if "account_data" not in acct_result:
+                err = acct_result.get("error_message", str(acct_result))
+                logger.error(f"Autofill account_info failed: {err}")
                 trade_data["error"] = err
                 await log_trade(trade_data)
                 return False
 
-            tx_blob = autofill_result.get("tx_blob", "")
-            tx_hash = autofill_result.get("tx_json", {}).get("hash", "unknown")
+            sequence = acct_result["account_data"]["Sequence"]
+            current_ledger = acct_result.get("ledger_current_index", 0)
 
-            # Step 2: submit signed blob
+            tx_dict["Sequence"] = sequence
+            tx_dict["Fee"] = "12"  # 12 drops, standard XRPL fee
+            tx_dict["LastLedgerSequence"] = current_ledger + 4  # ~20s window
+            tx_dict["SigningPubKey"] = self.wallet.public_key
+
+            # Step 2: Client-side sign — seed never sent over the network
+            encoded_for_signing = encode_for_signing(tx_dict)
+            signature = keypairs_sign(
+                bytes.fromhex(encoded_for_signing), self.wallet.private_key
+            )
+            tx_dict["TxnSignature"] = signature
+            tx_blob = xrpl_encode(tx_dict)
+
             submit_payload = {
                 "method": "submit",
                 "params": [{"tx_blob": tx_blob}],
@@ -174,6 +182,7 @@ class TradeExecutor:
             )
             submit_result = submit_response.get("result", {})
             engine_result = submit_result.get("engine_result", "unknown")
+            tx_hash = submit_result.get("tx_json", {}).get("hash", "unknown")
 
             trade_data["hash"] = tx_hash
             trade_data["engine_result"] = engine_result

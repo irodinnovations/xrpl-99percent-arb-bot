@@ -94,6 +94,11 @@ async def main():
                 logger.warning("Zero balance — skipping scan")
                 return
 
+            # Set circuit breaker reference balance on first successful fetch (SAFE-02)
+            if circuit_breaker.reference_balance <= Decimal("0"):
+                circuit_breaker.reference_balance = balance
+                logger.info(f"Circuit breaker reference balance set: {balance} XRP")
+
             # Scan for arbitrage opportunities via ripple_path_find
             opportunities = await pathfinder.scan(balance)
 
