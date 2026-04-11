@@ -21,12 +21,18 @@ def calculate_profit(
 ) -> Decimal:
     """Calculate net profit ratio after fees and slippage.
 
-    Formula: ((output - input) / input) - network_fee - slippage_buffer
+    Formula: ((output - input) / input) - (network_fee / input) - slippage_buffer
+
+    NETWORK_FEE is a flat cost in XRP (12 drops = 0.000012 XRP), so we convert
+    it to a ratio relative to the actual trade size. On a 0.5 XRP trade this is
+    0.0024%; on a 50 XRP trade it's 0.000024%.
+
     Returns: Net profit as a Decimal ratio (e.g., 0.008 = 0.8%).
     """
     gross_ratio = (output_xrp - input_xrp) / input_xrp
+    fee_ratio = NETWORK_FEE / input_xrp
     slippage = calculate_slippage(volatility_factor)
-    return gross_ratio - NETWORK_FEE - slippage
+    return gross_ratio - fee_ratio - slippage
 
 
 def is_profitable(

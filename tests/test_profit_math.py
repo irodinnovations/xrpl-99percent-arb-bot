@@ -13,8 +13,9 @@ from src.profit_math import (
 def test_calculate_profit_basic():
     profit = calculate_profit(Decimal("1"), Decimal("1.01"))
     assert isinstance(profit, Decimal)
-    # 0.01 - 0.000012 - 0.003 = 0.006988
-    assert profit == Decimal("1.01") / Decimal("1") - 1 - Decimal("0.000012") - Decimal("0.003")
+    # gross=0.01, fee_ratio=0.000012/1=0.000012, slippage=0.003
+    # net = 0.01 - 0.000012 - 0.003 = 0.006988
+    assert profit == Decimal("0.01") - Decimal("0.000012") / Decimal("1") - Decimal("0.003")
 
 
 def test_calculate_profit_returns_decimal():
@@ -63,3 +64,11 @@ def test_position_size_never_exceeds_five_percent():
     size = calculate_position_size(Decimal("1000"))
     assert size == Decimal("50")  # exactly 5%
     assert size <= Decimal("1000") * Decimal("0.05")
+
+
+def test_fee_ratio_scales_with_trade_size():
+    """Larger trades should have a smaller fee impact (fee is flat 12 drops)."""
+    small_trade = calculate_profit(Decimal("0.5"), Decimal("0.505"))
+    large_trade = calculate_profit(Decimal("50"), Decimal("50.5"))
+    # Same 1% gross profit, but the 12-drop fee matters more on 0.5 XRP
+    assert large_trade > small_trade
