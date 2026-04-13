@@ -139,6 +139,23 @@ class PathFinder:
 
             request = self.build_path_request(position_size)
             response = await self.connection.send_request(request)
+
+            # Debug: log raw alternative count so we can diagnose zero-opp issues
+            if response:
+                alt_count = len(response.get("alternatives", []))
+                logger.debug(
+                    f"Tier {tier * 100:.0f}% ({position_size:.2f} XRP): "
+                    f"ripple_path_find returned {alt_count} alternative(s)"
+                )
+                if alt_count > 0:
+                    for i, alt in enumerate(response["alternatives"]):
+                        src = alt.get("source_amount", "?")
+                        logger.debug(f"  Alt {i+1}: source_amount={src}")
+            else:
+                logger.warning(
+                    f"Tier {tier * 100:.0f}%: ripple_path_find returned None"
+                )
+
             opps = self.parse_alternatives(response, position_size, volatility_factor)
 
             if opps:
