@@ -116,7 +116,14 @@ def build_trust_set_tx(
     sequence: int,
     current_ledger: int,
 ) -> dict:
-    """Build a raw TrustSet transaction dict."""
+    """Build a raw TrustSet transaction dict.
+
+    Sets tfSetNoRipple (131072) to prevent the issuer from rippling tokens
+    through this account. Without this flag, balances could shift without
+    the account holder initiating a transaction.
+    """
+    # tfSetNoRipple = 0x00020000 = 131072
+    TF_SET_NO_RIPPLE = 131072
     return {
         "TransactionType": "TrustSet",
         "Account": wallet_address,
@@ -128,7 +135,7 @@ def build_trust_set_tx(
         "Sequence": sequence,
         "Fee": "12",
         "LastLedgerSequence": current_ledger + 20,  # ~80s window, generous for sequential
-        "Flags": 0,
+        "Flags": TF_SET_NO_RIPPLE,
     }
 
 
