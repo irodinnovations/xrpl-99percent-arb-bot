@@ -23,6 +23,9 @@ XRPL_RPC_URL: str = os.getenv("XRPL_RPC_URL", "https://s1.ripple.com")
 DRY_RUN: bool = os.getenv("DRY_RUN", "True").lower() in ("true", "1", "yes")
 PROFIT_THRESHOLD: Decimal = Decimal(os.getenv("PROFIT_THRESHOLD", "0.006"))
 MAX_POSITION_PCT: Decimal = Decimal(os.getenv("MAX_POSITION_PCT", "0.05"))
+# Multi-tier scanning: probe at multiple position sizes per ledger cycle
+# to surface opportunities at different trade amounts (1%, 5%, 10% of balance).
+POSITION_TIERS: list[Decimal] = [Decimal("0.01"), Decimal("0.05"), Decimal("0.10")]
 DAILY_LOSS_LIMIT_PCT: Decimal = Decimal(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))
 SLIPPAGE_BASE: Decimal = Decimal(os.getenv("SLIPPAGE_BASE", "0.003"))
 NETWORK_FEE: Decimal = Decimal("0.000012")  # ~12 drops, standard XRPL fee

@@ -1,5 +1,6 @@
 """Pathfinder using ripple_path_find for hybrid AMM+CLOB arbitrage discovery."""
 
+import json
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -7,7 +8,7 @@ from typing import Optional
 
 from xrpl.models.requests import RipplePathFind
 
-from src.config import PROFIT_THRESHOLD
+from src.config import PROFIT_THRESHOLD, POSITION_TIERS
 from src.connection import XRPLConnection
 from src.profit_math import calculate_profit, is_profitable, calculate_position_size
 
@@ -113,13 +114,72 @@ class PathFinder:
         self,
         account_balance: Decimal,
         volatility_factor: Decimal = Decimal("0"),
+        position_tiers: Optional[list[Decimal]] = None,
     ) -> list[Opportunity]:
-        """Run a single scan cycle: compute position size, path_find, parse results."""
-        position_size = calculate_position_size(account_balance)
-        if position_size <= Decimal("0"):
-            logger.warning("Position size is zero — skipping scan")
-            return []
+        """Run a multi-tier scan cycle: probe at multiple position sizes per ledger.
 
-        request = self.build_path_request(position_size)
-        response = await self.connection.send_request(request)
-        return self.parse_alternatives(response, position_size, volatility_factor)
+        Different trade amounts surface different paths — a small probe may find
+        thin AMM pools, while a larger probe finds CLOB depth. Each tier calls
+        ripple_path_find independently (free RPC calls) and results are merged
+        with deduplication (highest profit ratio kept per unique path).
+
+        Args:
+            account_balance: Current XRP balance.
+            volatility_factor: 0-1 volatility estimate for slippage calculation.
+            position_tiers: List of Decimal fractions (e.g., [0.01, 0.05, 0.10]).
+                            Defaults to POSITION_TIERS from config.
+        """
+        tiers = position_tiers if position_tiers is not None else POSITION_TIERS
+        all_opportunities: list[Opportunity] = []
+
+        for tier in tiers:
+            position_size = account_balance * tier
+            if position_size <= Decimal("0"):
+                continue
+
+            request = self.build_path_request(position_size)
+            response = await self.connection.send_request(request)
+            opps = self.parse_alternatives(response, position_size, volatility_factor)
+
+            if opps:
+                logger.info(
+                    f"Tier {tier * 100:.0f}%: {len(opps)} opportunity(s) "
+                    f"at {position_size:.2f} XRP"
+                )
+            all_opportunities.extend(opps)
+
+        return _deduplicate_opportunities(all_opportunities)
+
+
+def _path_signature(paths: list) -> str:
+    """Create a hashable signature from a paths list for deduplication.
+
+    Two opportunities with identical path routes (same intermediate hops)
+    are considered duplicates — we keep whichever has the best profit ratio.
+    """
+    return json.dumps(paths, sort_keys=True, default=str)
+
+
+def _deduplicate_opportunities(opportunities: list[Opportunity]) -> list[Opportunity]:
+    """Deduplicate opportunities by path, keeping highest profit ratio per path.
+
+    When multiple tiers discover the same route, the tier that yields the best
+    net profit ratio wins. This prevents the executor from submitting the same
+    path twice at different amounts.
+    """
+    if len(opportunities) <= 1:
+        return opportunities
+
+    best_by_path: dict[str, Opportunity] = {}
+    for opp in opportunities:
+        sig = _path_signature(opp.paths)
+        existing = best_by_path.get(sig)
+        if existing is None or opp.profit_ratio > existing.profit_ratio:
+            best_by_path[sig] = opp
+
+    deduped = list(best_by_path.values())
+    if len(deduped) < len(opportunities):
+        logger.info(
+            f"Deduplicated: {len(opportunities)} -> {len(deduped)} unique paths"
+        )
+    return deduped
