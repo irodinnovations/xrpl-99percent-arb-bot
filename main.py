@@ -22,6 +22,7 @@ from src.config import (
     LOG_LEVEL,
     PROFIT_THRESHOLD,
     MAX_POSITION_PCT,
+    SCAN_INTERVAL,
 )
 from src.connection import XRPLConnection
 from src.pathfinder import PathFinder
@@ -53,6 +54,7 @@ async def main():
     logger.info(f"Mode: {'DRY RUN (paper trading)' if DRY_RUN else 'LIVE TRADING'}")
     logger.info(f"Profit threshold: {PROFIT_THRESHOLD * 100}%")
     logger.info(f"Max position: {MAX_POSITION_PCT * 100}% of balance")
+    logger.info(f"Scan interval: every {SCAN_INTERVAL} ledgers")
 
     # Initialize all modules
     connection = XRPLConnection()
@@ -69,23 +71,42 @@ async def main():
         dry_run=DRY_RUN,
     )
 
-    # Track scan count for heartbeat logging
+    # Track ledger count and prevent overlapping scans
+    ledger_count = 0
     scan_count = 0
+    scanning = False
 
     async def on_ledger_close(ledger_index: int):
         """Called every ~3-5 seconds on each XRPL ledger close.
 
+        Runs the two-leg pathfinder every SCAN_INTERVAL ledgers (not every
+        ledger) because 27 IOUs x 3 tiers x 2 probes = 162 path_find calls
+        per scan.  A lock prevents overlapping scans if one takes longer
+        than the interval.
+
         Top-level try/except prevents any single scan error from crashing
         the bot — connection auto-reconnects independently (T-01-11).
         """
-        nonlocal scan_count
-        scan_count += 1
+        nonlocal ledger_count, scan_count, scanning
+        ledger_count += 1
 
         # Skip scans while circuit breaker is active; log every ~5 minutes
         if circuit_breaker.is_halted():
-            if scan_count % 100 == 0:
+            if ledger_count % 100 == 0:
                 logger.info("Circuit breaker active — skipping scans")
             return
+
+        # Only scan every SCAN_INTERVAL ledgers
+        if ledger_count % SCAN_INTERVAL != 0:
+            return
+
+        # Prevent overlapping scans — if a previous scan is still running, skip
+        if scanning:
+            logger.debug("Previous scan still running — skipping this interval")
+            return
+
+        scanning = True
+        scan_count += 1
 
         try:
             # Get current balance for position sizing
@@ -99,7 +120,7 @@ async def main():
                 circuit_breaker.reference_balance = balance
                 logger.info(f"Circuit breaker reference balance set: {balance} XRP")
 
-            # Scan for arbitrage opportunities via ripple_path_find
+            # Scan for arbitrage opportunities via two-leg ripple_path_find
             opportunities = await pathfinder.scan(balance)
 
             for opp in opportunities:
@@ -119,8 +140,8 @@ async def main():
                     }
                     asyncio.create_task(review_trade(trade_review_data))
 
-            # Heartbeat log every ~50 ledgers (~3 minutes at 3-5s per ledger)
-            if scan_count % 50 == 0:
+            # Heartbeat log every ~5 scans
+            if scan_count % 5 == 0:
                 logger.info(
                     f"Heartbeat: ledger={ledger_index}, scans={scan_count}, "
                     f"balance={balance} XRP, halted={circuit_breaker.is_halted()}"
@@ -129,6 +150,8 @@ async def main():
         except Exception as e:
             # Log error but never re-raise — bot must keep scanning (T-01-11)
             logger.error(f"Scan error at ledger {ledger_index}: {e}")
+        finally:
+            scanning = False
 
     # Register the ledger-close callback before connecting
     connection.on_ledger_close(on_ledger_close)

@@ -30,6 +30,12 @@ DAILY_LOSS_LIMIT_PCT: Decimal = Decimal(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"
 SLIPPAGE_BASE: Decimal = Decimal(os.getenv("SLIPPAGE_BASE", "0.003"))
 NETWORK_FEE: Decimal = Decimal("0.000012")  # ~12 drops, standard XRPL fee
 
+# Scan interval: run pathfinder every N ledger closes (~3-5s each).
+# 27 IOUs x 3 tiers x 2 probes = 162 path_find calls per scan, so
+# scanning every ledger would overwhelm the connection.  Default 10
+# means one full scan every ~30-50 seconds.
+SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "10"))
+
 # Telegram (optional)
 TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
