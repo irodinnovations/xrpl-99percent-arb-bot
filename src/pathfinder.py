@@ -1,24 +1,27 @@
-"""Two-leg arbitrage scanner using ripple_path_find.
+"""Two-leg arbitrage scanner using book_offers for rate discovery.
 
-Strategy: For each trust-lined IOU, probe two legs:
-  Leg 1 (sell probe): How much IOU to receive target XRP?
-  Leg 2 (buy probe):  How much XRP to acquire that IOU?
-  If buy cost < target XRP -> the round-trip is profitable.
+Strategy: For each trust-lined IOU, query both sides of the order book:
+  Buy side  (ask): book_offers where taker gets IOU, pays XRP
+  Sell side (bid): book_offers where taker gets XRP, pays IOU
+  If best bid > best ask + fees + slippage -> arbitrage opportunity.
 
-ripple_path_find considers both AMM pools and CLOB order books, so this
-catches opportunities from either venue.  The actual execution remains a
-single atomic Payment transaction (XRP -> IOU -> XRP) handled by the
-existing executor — only the *discovery* strategy changes.
+book_offers returns the CLOB order book directly and does NOT require
+the account to hold the source currency (unlike ripple_path_find, which
+returns empty alternatives when the wallet has 0 IOU balance).
 
-Why two legs instead of one:
-  ripple_path_find does NOT discover circular XRP->IOU->XRP routes when
-  source_account = destination_account and both amounts are XRP.  It
-  returns an empty alternatives array every time.  However, the XRP->IOU
-  direction works fine, as does IOU->XRP.  By splitting into two probes
-  we get the effective buy/sell rates and can detect arbitrage.
+The actual execution remains a single atomic Payment transaction
+(XRP -> IOU -> XRP) which uses ALL available liquidity (AMM + CLOB).
+The simulation gate validates the real execution price before any trade.
+
+Why book_offers instead of ripple_path_find:
+  ripple_path_find for the sell leg (IOU -> XRP) requires the source
+  account to hold the IOU.  Since the bot never accumulates IOUs
+  (round-trip trades are atomic), the wallet always has 0 IOU balance,
+  causing all sell probes to return "no path".  book_offers has no such
+  restriction — it shows available offers regardless of the caller's
+  balance.
 """
 
-import asyncio
 import json
 import logging
 import time
@@ -26,7 +29,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from xrpl.models.requests import RipplePathFind, AccountLines
+from xrpl.models.requests import BookOffers, AccountLines
 
 from src.config import PROFIT_THRESHOLD, POSITION_TIERS
 from src.connection import XRPLConnection
@@ -38,6 +41,10 @@ DROPS_PER_XRP = Decimal("1000000")
 
 # Cache trust lines for 5 minutes — they rarely change.
 _TRUST_LINE_CACHE_TTL = 300
+
+# Number of offers to fetch from each side of the book.
+# More offers = better depth estimate, but diminishing returns.
+_BOOK_DEPTH = 10
 
 
 @dataclass
@@ -52,7 +59,7 @@ class Opportunity:
 
 
 class PathFinder:
-    """Two-leg arbitrage scanner across trust-lined IOUs."""
+    """Two-leg arbitrage scanner using order book rate discovery."""
 
     def __init__(self, connection: XRPLConnection, wallet_address: str):
         self.connection = connection
@@ -82,89 +89,90 @@ class PathFinder:
         return self._trust_lines
 
     # ------------------------------------------------------------------
-    # ripple_path_find helpers
+    # Order book rate discovery
     # ------------------------------------------------------------------
 
-    async def _path_find(
-        self,
-        dest_amount,
-        source_currencies: list[dict],
-    ) -> Optional[dict]:
-        """Send ripple_path_find and return the best (first) alternative.
+    async def _get_buy_rate(
+        self, currency: str, issuer: str
+    ) -> Optional[Decimal]:
+        """Get the effective rate to BUY this IOU with XRP (ask price).
 
-        Returns the raw alternative dict or None if no paths found.
+        Queries the order book where taker gets IOU and pays XRP.
+        Returns XRP cost per unit of IOU (lower is better for buying),
+        or None if the book is empty.
+
+        Uses the best (top) offer for rate discovery.  The simulation
+        gate validates the actual execution price at trade time.
         """
-        request = RipplePathFind(
-            source_account=self.wallet_address,
-            destination_account=self.wallet_address,
-            destination_amount=dest_amount,
-            source_currencies=source_currencies,
+        request = BookOffers(
+            taker_gets={"currency": currency, "issuer": issuer},
+            taker_pays={"currency": "XRP"},
+            limit=_BOOK_DEPTH,
         )
         result = await self.connection.send_request(request)
-        if not result:
-            return None
-        alts = result.get("alternatives", [])
-        return alts[0] if alts else None
-
-    async def _probe_buy_cost(
-        self, currency: str, issuer: str, iou_amount: Decimal
-    ) -> Optional[Decimal]:
-        """How much XRP to buy *iou_amount* of the specified IOU?
-
-        Calls ripple_path_find with:
-          destination_amount = {currency, issuer, value}
-          source_currencies  = [XRP]
-
-        Returns the XRP cost (Decimal) or None if no path found.
-        """
-        dest = {
-            "currency": currency,
-            "issuer": issuer,
-            "value": str(iou_amount),
-        }
-        alt = await self._path_find(dest, [{"currency": "XRP"}])
-        if alt is None:
+        if not result or not result.get("offers"):
             return None
 
-        source = alt.get("source_amount", "0")
-        # XRP source_amount is a string of drops, not a dict
-        if isinstance(source, dict):
-            logger.debug(f"Buy probe got IOU source (expected drops): {source}")
-            return None
+        offer = result["offers"][0]
         try:
-            return Decimal(str(source)) / DROPS_PER_XRP
-        except (InvalidOperation, ArithmeticError) as e:
-            logger.debug(f"Buy probe parse error: {e}")
+            # TakerGets = IOU amount (dict), TakerPays = XRP drops (string)
+            gets = offer.get("TakerGets")
+            pays = offer.get("TakerPays")
+
+            if not isinstance(gets, dict) or isinstance(pays, dict):
+                logger.debug(f"Buy book unexpected format: gets={gets}, pays={pays}")
+                return None
+
+            iou_amount = Decimal(str(gets.get("value", "0")))
+            xrp_amount = Decimal(str(pays)) / DROPS_PER_XRP
+
+            if iou_amount <= Decimal("0") or xrp_amount <= Decimal("0"):
+                return None
+
+            return xrp_amount / iou_amount  # XRP per IOU
+
+        except (InvalidOperation, ArithmeticError, TypeError) as e:
+            logger.debug(f"Buy book parse error: {e}")
             return None
 
-    async def _probe_sell_cost(
-        self, currency: str, issuer: str, xrp_amount: Decimal
+    async def _get_sell_rate(
+        self, currency: str, issuer: str
     ) -> Optional[Decimal]:
-        """How much IOU is needed to receive *xrp_amount* XRP?
+        """Get the effective rate to SELL this IOU for XRP (bid price).
 
-        Calls ripple_path_find with:
-          destination_amount = drops string (XRP)
-          source_currencies  = [{currency, issuer}]
-
-        Returns the IOU amount needed (Decimal) or None if no path found.
+        Queries the order book where taker gets XRP and pays IOU.
+        Returns XRP received per unit of IOU (higher is better for selling),
+        or None if the book is empty.
         """
-        dest_drops = str(int(xrp_amount * DROPS_PER_XRP))
-        alt = await self._path_find(
-            dest_drops,
-            [{"currency": currency, "issuer": issuer}],
+        request = BookOffers(
+            taker_gets={"currency": "XRP"},
+            taker_pays={"currency": currency, "issuer": issuer},
+            limit=_BOOK_DEPTH,
         )
-        if alt is None:
+        result = await self.connection.send_request(request)
+        if not result or not result.get("offers"):
             return None
 
-        source = alt.get("source_amount")
-        # IOU source_amount is a dict {currency, issuer, value}
-        if not isinstance(source, dict):
-            logger.debug(f"Sell probe got drops (expected IOU dict): {source}")
-            return None
+        offer = result["offers"][0]
         try:
-            return Decimal(str(source.get("value", "0")))
-        except (InvalidOperation, ArithmeticError) as e:
-            logger.debug(f"Sell probe parse error: {e}")
+            # TakerGets = XRP drops (string), TakerPays = IOU amount (dict)
+            gets = offer.get("TakerGets")
+            pays = offer.get("TakerPays")
+
+            if isinstance(gets, dict) or not isinstance(pays, dict):
+                logger.debug(f"Sell book unexpected format: gets={gets}, pays={pays}")
+                return None
+
+            xrp_amount = Decimal(str(gets)) / DROPS_PER_XRP
+            iou_amount = Decimal(str(pays.get("value", "0")))
+
+            if iou_amount <= Decimal("0") or xrp_amount <= Decimal("0"):
+                return None
+
+            return xrp_amount / iou_amount  # XRP per IOU
+
+        except (InvalidOperation, ArithmeticError, TypeError) as e:
+            logger.debug(f"Sell book parse error: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -192,53 +200,46 @@ class PathFinder:
     # Single-IOU round-trip check
     # ------------------------------------------------------------------
 
-    async def _check_iou(
+    def _check_spread(
         self,
         currency: str,
         issuer: str,
+        buy_rate: Decimal,
+        sell_rate: Decimal,
         position_xrp: Decimal,
         volatility_factor: Decimal,
     ) -> Optional[Opportunity]:
-        """Two-leg round-trip arbitrage check for a single IOU.
+        """Check if the bid/ask spread yields a profitable round-trip.
 
-        1. Sell probe: how much IOU to receive position_xrp back?
-        2. Buy probe: how much XRP to acquire that much IOU?
-        3. If buy_cost < position_xrp -> round-trip is profitable.
-
-        The actual execution path (XRP -> IOU -> XRP) is a single atomic
-        Payment transaction — the XRPL engine handles the intermediate
-        swaps without the user needing to hold the IOU beforehand.
+        Round-trip: spend position_xrp -> buy IOU at ask -> sell at bid.
+          iou_bought = position_xrp / buy_rate
+          output_xrp = iou_bought * sell_rate
+                     = position_xrp * (sell_rate / buy_rate)
+        Profit if output_xrp > position_xrp + fees + slippage.
         """
-        # Leg 1 — sell probe: IOU cost to get position_xrp XRP
-        sell_iou = await self._probe_sell_cost(currency, issuer, position_xrp)
-        if sell_iou is None or sell_iou <= Decimal("0"):
+        if sell_rate <= buy_rate:
+            return None  # No spread — bid <= ask
+
+        output_xrp = position_xrp * sell_rate / buy_rate
+
+        if output_xrp <= position_xrp:
             return None
 
-        # Leg 2 — buy probe: XRP cost to acquire sell_iou units of this IOU
-        buy_xrp = await self._probe_buy_cost(currency, issuer, sell_iou)
-        if buy_xrp is None or buy_xrp <= Decimal("0"):
-            return None
-
-        # Round-trip check: spend buy_xrp -> get sell_iou IOU -> sell for position_xrp
-        if buy_xrp >= position_xrp:
-            return None  # No profit — cost equals or exceeds return
-
-        # Verify profit exceeds threshold after fees and slippage
-        profit_ratio = calculate_profit(buy_xrp, position_xrp, volatility_factor)
-        if not is_profitable(buy_xrp, position_xrp, volatility_factor):
+        profit_ratio = calculate_profit(position_xrp, output_xrp, volatility_factor)
+        if not is_profitable(position_xrp, output_xrp, volatility_factor):
             return None
 
         profit_pct = profit_ratio * Decimal("100")
         logger.info(
             f"OPPORTUNITY: {currency}/{issuer[:8]}... | "
             f"{profit_pct:.4f}% profit | "
-            f"buy={buy_xrp:.6f} XRP -> sell={position_xrp:.6f} XRP | "
-            f"via {sell_iou} IOU"
+            f"in={position_xrp:.6f} XRP -> out={output_xrp:.6f} XRP | "
+            f"ask={buy_rate:.8f} bid={sell_rate:.8f}"
         )
 
         return Opportunity(
-            input_xrp=buy_xrp,
-            output_xrp=position_xrp,
+            input_xrp=position_xrp,
+            output_xrp=output_xrp,
             profit_pct=profit_pct,
             profit_ratio=profit_ratio,
             paths=self._build_path(currency, issuer),
@@ -255,14 +256,15 @@ class PathFinder:
         volatility_factor: Decimal = Decimal("0"),
         position_tiers: Optional[list[Decimal]] = None,
     ) -> list[Opportunity]:
-        """Multi-tier two-leg scan across all trust-lined IOUs.
+        """Scan all trust-lined IOUs for order-book arbitrage.
 
-        For each IOU x tier:
-          1. Sell probe: how much IOU to get target XRP?
-          2. Buy probe: how much XRP to acquire that IOU?
-          3. If buy < sell target -> arbitrage opportunity.
+        For each IOU:
+          1. Fetch buy rate (ask) and sell rate (bid) from book_offers
+          2. For each position tier: check if bid > ask + fees + slippage
+          3. If profitable -> create Opportunity
 
-        With 27 trust lines, 3 tiers, 2 probes each = 162 path_find calls.
+        Rate discovery is 2 calls per IOU (54 total for 27 IOUs).
+        Tier checks are pure math — no additional RPC calls.
         Call this every N ledgers (SCAN_INTERVAL), not every ledger.
 
         Args:
@@ -279,29 +281,45 @@ class PathFinder:
 
         all_opps: list[Opportunity] = []
         probed = 0
+        books_found = 0
 
         for line in trust_lines:
             currency = line["currency"]
             issuer = line["account"]
 
+            # Two RPC calls per IOU: buy book + sell book
+            buy_rate = await self._get_buy_rate(currency, issuer)
+            sell_rate = await self._get_sell_rate(currency, issuer)
+            probed += 1
+
+            if buy_rate is None or sell_rate is None:
+                continue
+
+            books_found += 1
+
+            # Check each position tier (pure math, no RPC)
             for tier in tiers:
                 position_xrp = account_balance * tier
                 if position_xrp <= Decimal("0"):
                     continue
 
-                opp = await self._check_iou(
-                    currency, issuer, position_xrp, volatility_factor,
+                opp = self._check_spread(
+                    currency, issuer,
+                    buy_rate, sell_rate,
+                    position_xrp, volatility_factor,
                 )
-                probed += 1
                 if opp:
                     all_opps.append(opp)
 
-        logger.debug(f"Scan complete: {probed} probes, {len(all_opps)} opportunities")
+        logger.debug(
+            f"Scan complete: {probed} IOUs probed, {books_found} with books, "
+            f"{len(all_opps)} opportunities"
+        )
         return _deduplicate_opportunities(all_opps)
 
 
 # ------------------------------------------------------------------
-# Deduplication helpers (unchanged from original)
+# Deduplication helpers
 # ------------------------------------------------------------------
 
 def _path_signature(paths: list) -> str:

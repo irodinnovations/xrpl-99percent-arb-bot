@@ -1,8 +1,8 @@
-"""Tests for two-leg PathFinder — probe helpers, round-trip checks, scanning."""
+"""Tests for PathFinder — book_offers rate discovery, spread checks, scanning."""
 
 import pytest
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from src.pathfinder import PathFinder, Opportunity, DROPS_PER_XRP, _deduplicate_opportunities
 
 
@@ -59,94 +59,99 @@ async def test_fetch_trust_lines_caches(pathfinder, mock_connection):
     }
     await pathfinder._fetch_trust_lines()
     await pathfinder._fetch_trust_lines()
-    # Only one RPC call — second uses cache
     assert mock_connection.send_request.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_fetch_trust_lines_failure_returns_stale(pathfinder, mock_connection):
-    # Populate cache first
     pathfinder._trust_lines = [{"currency": "USD", "account": "rTest"}]
-    pathfinder._trust_lines_ts = 0  # Force cache miss
-    mock_connection.send_request.return_value = None  # Failure
-    lines = await pathfinder._fetch_trust_lines()
-    assert len(lines) == 1  # Returns stale cache
-
-
-# --- Buy probe ---
-
-
-@pytest.mark.asyncio
-async def test_probe_buy_cost_success(pathfinder, mock_connection):
-    mock_connection.send_request.return_value = {
-        "alternatives": [{
-            "source_amount": "748000",  # 0.748 XRP in drops
-            "paths_computed": [["somepath"]],
-        }]
-    }
-    cost = await pathfinder._probe_buy_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost == Decimal("748000") / DROPS_PER_XRP
-    assert cost == Decimal("0.748")
-
-
-@pytest.mark.asyncio
-async def test_probe_buy_cost_no_alternatives(pathfinder, mock_connection):
-    mock_connection.send_request.return_value = {"alternatives": []}
-    cost = await pathfinder._probe_buy_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost is None
-
-
-@pytest.mark.asyncio
-async def test_probe_buy_cost_iou_source_returns_none(pathfinder, mock_connection):
-    """If source_amount is an IOU dict (not drops), return None."""
-    mock_connection.send_request.return_value = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rTest", "value": "100"},
-        }]
-    }
-    cost = await pathfinder._probe_buy_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost is None
-
-
-@pytest.mark.asyncio
-async def test_probe_buy_cost_connection_failure(pathfinder, mock_connection):
+    pathfinder._trust_lines_ts = 0
     mock_connection.send_request.return_value = None
-    cost = await pathfinder._probe_buy_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost is None
+    lines = await pathfinder._fetch_trust_lines()
+    assert len(lines) == 1
 
 
-# --- Sell probe ---
+# --- Buy rate (ask) from book_offers ---
 
 
 @pytest.mark.asyncio
-async def test_probe_sell_cost_success(pathfinder, mock_connection):
+async def test_get_buy_rate_success(pathfinder, mock_connection):
+    """Buy book: taker gets IOU, pays XRP drops."""
     mock_connection.send_request.return_value = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rBitstamp", "value": "1.35"},
-            "paths_computed": [["somepath"]],
+        "offers": [{
+            "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
+            "TakerPays": "74800000",  # 74.8 XRP in drops
         }]
     }
-    cost = await pathfinder._probe_sell_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost == Decimal("1.35")
+    rate = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    # 74.8 XRP / 100 USD = 0.748 XRP per USD
+    assert rate == Decimal("74800000") / DROPS_PER_XRP / Decimal("100")
+    assert rate == Decimal("0.748")
 
 
 @pytest.mark.asyncio
-async def test_probe_sell_cost_no_alternatives(pathfinder, mock_connection):
-    mock_connection.send_request.return_value = {"alternatives": []}
-    cost = await pathfinder._probe_sell_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost is None
+async def test_get_buy_rate_empty_book(pathfinder, mock_connection):
+    mock_connection.send_request.return_value = {"offers": []}
+    rate = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    assert rate is None
 
 
 @pytest.mark.asyncio
-async def test_probe_sell_cost_drops_source_returns_none(pathfinder, mock_connection):
-    """If source_amount is drops (not IOU dict), return None."""
+async def test_get_buy_rate_connection_failure(pathfinder, mock_connection):
+    mock_connection.send_request.return_value = None
+    rate = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    assert rate is None
+
+
+@pytest.mark.asyncio
+async def test_get_buy_rate_unexpected_format(pathfinder, mock_connection):
+    """If TakerGets is XRP drops instead of IOU dict, return None."""
     mock_connection.send_request.return_value = {
-        "alternatives": [{
-            "source_amount": "1000000",
+        "offers": [{
+            "TakerGets": "1000000",
+            "TakerPays": "500000",
         }]
     }
-    cost = await pathfinder._probe_sell_cost("USD", "rBitstamp", Decimal("1"))
-    assert cost is None
+    rate = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    assert rate is None
+
+
+# --- Sell rate (bid) from book_offers ---
+
+
+@pytest.mark.asyncio
+async def test_get_sell_rate_success(pathfinder, mock_connection):
+    """Sell book: taker gets XRP drops, pays IOU."""
+    mock_connection.send_request.return_value = {
+        "offers": [{
+            "TakerGets": "74100000",  # 74.1 XRP in drops
+            "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
+        }]
+    }
+    rate = await pathfinder._get_sell_rate("USD", "rBitstamp")
+    # 74.1 XRP / 100 USD = 0.741 XRP per USD
+    assert rate == Decimal("74100000") / DROPS_PER_XRP / Decimal("100")
+    assert rate == Decimal("0.741")
+
+
+@pytest.mark.asyncio
+async def test_get_sell_rate_empty_book(pathfinder, mock_connection):
+    mock_connection.send_request.return_value = {"offers": []}
+    rate = await pathfinder._get_sell_rate("USD", "rBitstamp")
+    assert rate is None
+
+
+@pytest.mark.asyncio
+async def test_get_sell_rate_unexpected_format(pathfinder, mock_connection):
+    """If TakerGets is IOU dict instead of XRP drops, return None."""
+    mock_connection.send_request.return_value = {
+        "offers": [{
+            "TakerGets": {"currency": "USD", "issuer": "rTest", "value": "100"},
+            "TakerPays": {"currency": "EUR", "issuer": "rTest", "value": "90"},
+        }]
+    }
+    rate = await pathfinder._get_sell_rate("USD", "rBitstamp")
+    assert rate is None
 
 
 # --- Path construction ---
@@ -154,163 +159,157 @@ async def test_probe_sell_cost_drops_source_returns_none(pathfinder, mock_connec
 
 def test_build_path():
     path = PathFinder._build_path("USD", "rBitstamp123")
-    assert len(path) == 1  # One path
-    assert len(path[0]) == 1  # One step in the path
+    assert len(path) == 1
+    assert len(path[0]) == 1
     step = path[0][0]
     assert step["currency"] == "USD"
     assert step["issuer"] == "rBitstamp123"
     assert step["type"] == 48
 
 
-# --- Single IOU round-trip check ---
+# --- Spread check (pure math, no RPC) ---
 
 
-@pytest.mark.asyncio
-async def test_check_iou_profitable(pathfinder, mock_connection):
-    """Profitable round-trip: buy cost < sell yield."""
-    # Sell probe: need 1.3 USD to get 1 XRP back
-    sell_response = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rBitstamp", "value": "1.3"},
-        }]
-    }
-    # Buy probe: 1.3 USD costs 0.95 XRP (less than the 1 XRP we'd get back)
-    buy_response = {
-        "alternatives": [{
-            "source_amount": "950000",  # 0.95 XRP in drops
-        }]
-    }
-    mock_connection.send_request.side_effect = [sell_response, buy_response]
-
-    opp = await pathfinder._check_iou("USD", "rBitstamp", Decimal("1"), Decimal("0"))
-
+def test_check_spread_profitable(pathfinder):
+    """Positive spread: sell rate > buy rate by enough to clear threshold."""
+    opp = pathfinder._check_spread(
+        currency="USD", issuer="rBitstamp",
+        buy_rate=Decimal("0.700"),   # Ask: 0.70 XRP per USD
+        sell_rate=Decimal("0.750"),  # Bid: 0.75 XRP per USD
+        position_xrp=Decimal("10"),
+        volatility_factor=Decimal("0"),
+    )
     assert opp is not None
-    assert opp.input_xrp == Decimal("0.95")
-    assert opp.output_xrp == Decimal("1")
+    assert opp.input_xrp == Decimal("10")
+    # output = 10 * 0.75 / 0.70 = 10.714...
+    assert opp.output_xrp > Decimal("10")
     assert opp.profit_ratio > Decimal("0")
+
+
+def test_check_spread_no_spread(pathfinder):
+    """No spread: sell rate <= buy rate."""
+    opp = pathfinder._check_spread(
+        currency="USD", issuer="rBitstamp",
+        buy_rate=Decimal("0.748"),
+        sell_rate=Decimal("0.741"),  # Bid < Ask
+        position_xrp=Decimal("10"),
+        volatility_factor=Decimal("0"),
+    )
+    assert opp is None
+
+
+def test_check_spread_below_threshold(pathfinder):
+    """Tiny spread: positive but below profit threshold after fees/slippage."""
+    opp = pathfinder._check_spread(
+        currency="USD", issuer="rBitstamp",
+        buy_rate=Decimal("0.7480"),
+        sell_rate=Decimal("0.7485"),  # Barely above ask
+        position_xrp=Decimal("10"),
+        volatility_factor=Decimal("0"),
+    )
+    assert opp is None
+
+
+def test_check_spread_correct_path(pathfinder):
+    """Opportunity should contain the correct IOU routing path."""
+    opp = pathfinder._check_spread(
+        currency="USD", issuer="rBitstamp",
+        buy_rate=Decimal("0.700"),
+        sell_rate=Decimal("0.760"),
+        position_xrp=Decimal("10"),
+        volatility_factor=Decimal("0"),
+    )
+    assert opp is not None
     assert opp.paths == PathFinder._build_path("USD", "rBitstamp")
 
 
-@pytest.mark.asyncio
-async def test_check_iou_unprofitable(pathfinder, mock_connection):
-    """No profit: buy cost >= sell yield."""
-    sell_response = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rBitstamp", "value": "1.3"},
-        }]
-    }
-    # Buy probe: 1.3 USD costs 1.01 XRP (more than the 1 XRP we'd get back)
-    buy_response = {
-        "alternatives": [{
-            "source_amount": "1010000",  # 1.01 XRP
-        }]
-    }
-    mock_connection.send_request.side_effect = [sell_response, buy_response]
-
-    opp = await pathfinder._check_iou("USD", "rBitstamp", Decimal("1"), Decimal("0"))
-    assert opp is None
+# --- Full scan ---
 
 
 @pytest.mark.asyncio
-async def test_check_iou_sell_probe_fails(pathfinder, mock_connection):
-    """If sell probe returns no path, skip this IOU."""
-    mock_connection.send_request.return_value = {"alternatives": []}
-    opp = await pathfinder._check_iou("USD", "rBitstamp", Decimal("1"), Decimal("0"))
-    assert opp is None
-    # Only one call made (sell probe), buy probe never called
-    assert mock_connection.send_request.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_check_iou_buy_probe_fails(pathfinder, mock_connection):
-    """If buy probe returns no path, skip."""
-    sell_response = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rBitstamp", "value": "1.3"},
-        }]
-    }
-    mock_connection.send_request.side_effect = [
-        sell_response,
-        {"alternatives": []},  # buy probe fails
-    ]
-    opp = await pathfinder._check_iou("USD", "rBitstamp", Decimal("1"), Decimal("0"))
-    assert opp is None
-
-
-@pytest.mark.asyncio
-async def test_check_iou_below_threshold(pathfinder, mock_connection):
-    """Marginal profit below threshold is rejected."""
-    sell_response = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rBitstamp", "value": "1.3"},
-        }]
-    }
-    # Very thin margin: 0.999 XRP cost for 1 XRP — profit < threshold
-    buy_response = {
-        "alternatives": [{"source_amount": "999000"}]
-    }
-    mock_connection.send_request.side_effect = [sell_response, buy_response]
-
-    opp = await pathfinder._check_iou("USD", "rBitstamp", Decimal("1"), Decimal("0"))
-    assert opp is None  # Below 0.6% threshold after fees/slippage
-
-
-# --- Multi-tier scan ---
-
-
-@pytest.mark.asyncio
-async def test_scan_iterates_trust_lines_and_tiers(pathfinder, mock_connection):
-    """scan() should probe each IOU x tier combination."""
-    # Populate trust lines cache to avoid account_lines call
+async def test_scan_queries_both_books_per_iou(pathfinder, mock_connection):
+    """scan() should make 2 book_offers calls per IOU (buy book + sell book)."""
     pathfinder._trust_lines = [
         {"currency": "USD", "account": "rBitstamp"},
         {"currency": "EUR", "account": "rGateHub"},
     ]
-    pathfinder._trust_lines_ts = 9999999999  # Far future = cached
+    pathfinder._trust_lines_ts = 9999999999
 
-    # All probes return no alternatives
-    mock_connection.send_request.return_value = {"alternatives": []}
+    # All books empty
+    mock_connection.send_request.return_value = {"offers": []}
 
-    tiers = [Decimal("0.01"), Decimal("0.05")]
-    await pathfinder.scan(Decimal("100"), position_tiers=tiers)
+    await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
 
-    # 2 IOUs x 2 tiers = 4 sell probes, buy probes skipped (sell returns empty)
-    # But sell probes return no alternatives so only 4 calls total
+    # 2 IOUs x 2 books = 4 calls
     assert mock_connection.send_request.call_count == 4
 
 
 @pytest.mark.asyncio
 async def test_scan_returns_opportunities(pathfinder, mock_connection):
-    """scan() returns profitable opportunities across IOUs."""
+    """Profitable spread creates an opportunity."""
     pathfinder._trust_lines = [
         {"currency": "USD", "account": "rBitstamp"},
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # Sell then buy for each tier
-    sell_resp = {
-        "alternatives": [{
-            "source_amount": {"currency": "USD", "issuer": "rBitstamp", "value": "1.3"},
+    # Buy book (ask): 0.70 XRP per USD
+    buy_book = {
+        "offers": [{
+            "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
+            "TakerPays": "70000000",
         }]
     }
-    buy_resp = {
-        "alternatives": [{"source_amount": "950000"}]  # 0.95 XRP for 1 XRP tier
+    # Sell book (bid): 0.76 XRP per USD — nice spread
+    sell_book = {
+        "offers": [{
+            "TakerGets": "76000000",
+            "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
+        }]
     }
-    # Only one tier: sell, buy
-    mock_connection.send_request.side_effect = [sell_resp, buy_resp]
+    mock_connection.send_request.side_effect = [buy_book, sell_book]
 
     opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
     assert len(opps) == 1
-    assert opps[0].input_xrp == Decimal("0.95")
-    assert opps[0].output_xrp == Decimal("1")
+    assert opps[0].input_xrp == Decimal("1")
+    # output = 1 * 0.76 / 0.70 = 1.0857...
+    assert opps[0].output_xrp > Decimal("1.08")
+
+
+@pytest.mark.asyncio
+async def test_scan_tiers_share_rates(pathfinder, mock_connection):
+    """Multiple tiers use the same rate discovery (no extra RPC calls)."""
+    pathfinder._trust_lines = [
+        {"currency": "USD", "account": "rBitstamp"},
+    ]
+    pathfinder._trust_lines_ts = 9999999999
+
+    buy_book = {
+        "offers": [{
+            "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
+            "TakerPays": "70000000",
+        }]
+    }
+    sell_book = {
+        "offers": [{
+            "TakerGets": "76000000",
+            "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
+        }]
+    }
+    mock_connection.send_request.side_effect = [buy_book, sell_book]
+
+    tiers = [Decimal("0.01"), Decimal("0.05"), Decimal("0.10")]
+    opps = await pathfinder.scan(Decimal("100"), position_tiers=tiers)
+
+    # Only 2 RPC calls (one buy book, one sell book) for 3 tiers
+    assert mock_connection.send_request.call_count == 2
+    # All tiers should find the same spread — dedup keeps best
+    assert len(opps) >= 1
 
 
 @pytest.mark.asyncio
 async def test_scan_no_trust_lines(pathfinder, mock_connection):
-    """scan() with no trust lines returns empty."""
     mock_connection.send_request.return_value = {"lines": []}
-    pathfinder._trust_lines_ts = 0  # Force refresh
-
+    pathfinder._trust_lines_ts = 0
     opps = await pathfinder.scan(Decimal("100"))
     assert opps == []
 
