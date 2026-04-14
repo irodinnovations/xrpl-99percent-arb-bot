@@ -65,6 +65,18 @@ class XRPLConnection:
         """Register a callback for book_changes summaries (every ledger)."""
         self._on_book_changes_callbacks.append(callback)
 
+    @staticmethod
+    async def _safe_callback(coro, label: str) -> None:
+        """Run a callback coroutine with exception logging.
+
+        Used with asyncio.create_task so callbacks don't block the
+        message dispatch loop and exceptions don't crash the bot.
+        """
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"{label} callback error: {e}")
+
     async def connect(self):
         """Connect to XRPL WebSocket with auto-reconnect loop.
 
@@ -89,7 +101,15 @@ class XRPLConnection:
                         ],
                     )
 
-                    # Listen for messages and dispatch to callbacks
+                    # Listen for messages and dispatch to callbacks.
+                    # Callbacks are dispatched as asyncio.Tasks so they don't
+                    # block the message loop.  This is critical because:
+                    # - scan callbacks make RPC calls that await responses
+                    # - responses arrive as messages on this same connection
+                    # - if the loop is blocked awaiting a callback, the
+                    #   _handler task still resolves Futures, but the queue
+                    #   fills with stream messages (transactions, etc.)
+                    # Dispatching as Tasks keeps the loop draining the queue.
                     async for message in client:
                         if not isinstance(message, dict):
                             continue
@@ -101,26 +121,23 @@ class XRPLConnection:
                             self.ledger_index = message.get("ledger_index", 0)
                             logger.debug(f"Ledger closed: {self.ledger_index}")
                             for cb in self._on_ledger_callbacks:
-                                try:
-                                    await cb(self.ledger_index)
-                                except Exception as e:
-                                    logger.error(f"Ledger callback error: {e}")
+                                asyncio.create_task(self._safe_callback(
+                                    cb(self.ledger_index), "ledger"
+                                ))
 
                         # Validated transaction events
                         elif msg_type == "transaction":
                             for cb in self._on_transaction_callbacks:
-                                try:
-                                    await cb(message)
-                                except Exception as e:
-                                    logger.error(f"Transaction callback error: {e}")
+                                asyncio.create_task(self._safe_callback(
+                                    cb(message), "transaction"
+                                ))
 
                         # book_changes summaries (sent every ledger close)
                         if "changes" in message and message.get("type") == "bookChanges":
                             for cb in self._on_book_changes_callbacks:
-                                try:
-                                    await cb(message)
-                                except Exception as e:
-                                    logger.error(f"Book changes callback error: {e}")
+                                asyncio.create_task(self._safe_callback(
+                                    cb(message), "book_changes"
+                                ))
 
             except Exception as e:
                 self.connected = False
