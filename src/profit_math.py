@@ -1,7 +1,18 @@
 """Pure Decimal profit calculation — no floats allowed anywhere."""
 
 from decimal import Decimal
-from src.config import PROFIT_THRESHOLD, SLIPPAGE_BASE, NETWORK_FEE, MAX_POSITION_PCT
+from typing import Optional
+
+from src.config import (
+    PROFIT_THRESHOLD,
+    PROFIT_THRESHOLD_HIGH_LIQ,
+    PROFIT_THRESHOLD_LOW_LIQ,
+    HIGH_LIQ_CURRENCIES,
+    SLIPPAGE_BASE,
+    NETWORK_FEE,
+    MAX_POSITION_PCT,
+    MIN_POSITION_PCT,
+)
 
 
 def calculate_slippage(volatility_factor: Decimal = Decimal("0")) -> Decimal:
@@ -39,10 +50,17 @@ def is_profitable(
     input_xrp: Decimal,
     output_xrp: Decimal,
     volatility_factor: Decimal = Decimal("0"),
+    threshold: Optional[Decimal] = None,
 ) -> bool:
-    """Check if a trade exceeds the profit threshold (strictly greater than)."""
+    """Check if a trade exceeds the profit threshold (strictly greater than).
+
+    Args:
+        threshold: Override the default PROFIT_THRESHOLD.  Use with
+                   get_profit_threshold() for tiered thresholds.
+    """
     profit = calculate_profit(input_xrp, output_xrp, volatility_factor)
-    return profit > PROFIT_THRESHOLD
+    effective = threshold if threshold is not None else PROFIT_THRESHOLD
+    return profit > effective
 
 
 def calculate_position_size(account_balance: Decimal) -> Decimal:
@@ -51,3 +69,52 @@ def calculate_position_size(account_balance: Decimal) -> Decimal:
     Returns: Maximum XRP to risk on a single trade.
     """
     return account_balance * MAX_POSITION_PCT
+
+
+def get_profit_threshold(currency: str) -> Decimal:
+    """Return the profit threshold appropriate for a currency's liquidity class.
+
+    High-liquidity currencies (USD, USDC, RLUSD, EUR) use a lower threshold
+    because slippage is minimal on deep books.  The simulate gate catches
+    bad trades regardless, so the threshold's job is filtering out scan noise.
+
+    Returns:
+        PROFIT_THRESHOLD_HIGH_LIQ (0.3%) for high-liquidity currencies.
+        PROFIT_THRESHOLD (0.6%) for everything else (medium-liquidity default).
+    """
+    if currency.upper() in [c.strip().upper() for c in HIGH_LIQ_CURRENCIES]:
+        return PROFIT_THRESHOLD_HIGH_LIQ
+    return PROFIT_THRESHOLD
+
+
+def calculate_dynamic_position(
+    account_balance: Decimal,
+    profit_ratio: Decimal,
+    volatility_factor: Decimal = Decimal("0"),
+) -> Decimal:
+    """Calculate position size scaled by opportunity quality and volatility.
+
+    Higher profit ratio -> larger position (more confident opportunity).
+    Higher volatility -> smaller position (more slippage risk).
+
+    Position is clamped between MIN_POSITION_PCT and MAX_POSITION_PCT of
+    the account balance.
+
+    Args:
+        account_balance: Current XRP balance.
+        profit_ratio: Expected profit as a ratio (e.g., 0.008 = 0.8%).
+        volatility_factor: 0-1 Decimal from VolatilityTracker.
+
+    Returns:
+        Position size in XRP.
+    """
+    # Quality signal: 0.6% profit -> min position, 2%+ profit -> max position
+    quality = min(profit_ratio / Decimal("0.02"), Decimal("1"))
+
+    # Volatility penalty: high volatility reduces position size
+    vol_penalty = Decimal("1") - (volatility_factor * Decimal("0.5"))
+    vol_penalty = max(vol_penalty, Decimal("0.3"))  # Never reduce below 30%
+
+    pct = MIN_POSITION_PCT + (MAX_POSITION_PCT - MIN_POSITION_PCT) * quality * vol_penalty
+    pct = max(MIN_POSITION_PCT, min(pct, MAX_POSITION_PCT))
+    return account_balance * pct

@@ -1,4 +1,4 @@
-"""Tests for PathFinder — CLOB rates, AMM rates, cross-issuer, scanning."""
+"""Tests for PathFinder -- CLOB rates, AMM rates, cross-issuer, scanning."""
 
 import pytest
 from decimal import Decimal
@@ -89,7 +89,7 @@ async def test_fetch_trust_lines_caches(pathfinder, mock_connection):
     assert mock_connection.send_request.call_count == 1
 
 
-# --- CLOB buy rate ---
+# --- CLOB buy rate (now returns tuple) ---
 
 
 @pytest.mark.asyncio
@@ -100,20 +100,25 @@ async def test_get_buy_rate_success(pathfinder, mock_connection):
             "TakerPays": "74800000",
         }]
     }
-    rate = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    rate, depth = await pathfinder._get_buy_rate("USD", "rBitstamp")
     assert rate == Decimal("0.748")
+    assert depth == Decimal("74.8")
 
 
 @pytest.mark.asyncio
 async def test_get_buy_rate_empty_book(pathfinder, mock_connection):
     mock_connection.send_request.return_value = {"offers": []}
-    assert await pathfinder._get_buy_rate("USD", "rBitstamp") is None
+    rate, depth = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    assert rate is None
+    assert depth == Decimal("0")
 
 
 @pytest.mark.asyncio
 async def test_get_buy_rate_connection_failure(pathfinder, mock_connection):
     mock_connection.send_request.return_value = None
-    assert await pathfinder._get_buy_rate("USD", "rBitstamp") is None
+    rate, depth = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    assert rate is None
+    assert depth == Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -121,7 +126,8 @@ async def test_get_buy_rate_unexpected_format(pathfinder, mock_connection):
     mock_connection.send_request.return_value = {
         "offers": [{"TakerGets": "1000000", "TakerPays": "500000"}]
     }
-    assert await pathfinder._get_buy_rate("USD", "rBitstamp") is None
+    rate, depth = await pathfinder._get_buy_rate("USD", "rBitstamp")
+    assert rate is None
 
 
 @pytest.mark.asyncio
@@ -139,7 +145,7 @@ async def test_get_buy_rate_skips_dust_offer(pathfinder, mock_connection):
             },
         ]
     }
-    rate = await pathfinder._get_buy_rate("CNY", "rCNY")
+    rate, depth = await pathfinder._get_buy_rate("CNY", "rCNY")
     assert rate == Decimal("0.748")  # Uses second offer, not dust
 
 
@@ -152,10 +158,36 @@ async def test_get_buy_rate_all_dust(pathfinder, mock_connection):
             "TakerPays": "50000",
         }]
     }
-    assert await pathfinder._get_buy_rate("CNY", "rCNY") is None
+    rate, depth = await pathfinder._get_buy_rate("CNY", "rCNY")
+    assert rate is None
 
 
-# --- CLOB sell rate ---
+@pytest.mark.asyncio
+async def test_get_buy_rate_volume_weighted(pathfinder, mock_connection):
+    """Volume-weighted rate spans multiple book levels when target_xrp given."""
+    mock_connection.send_request.return_value = {
+        "offers": [
+            {  # Level 1: 10 XRP at rate 0.5 XRP/IOU (20 IOU available)
+                "TakerGets": {"currency": "USD", "issuer": "rTest", "value": "20"},
+                "TakerPays": "10000000",
+            },
+            {  # Level 2: 20 XRP at rate 0.667 XRP/IOU (30 IOU available)
+                "TakerGets": {"currency": "USD", "issuer": "rTest", "value": "30"},
+                "TakerPays": "20000000",
+            },
+        ]
+    }
+    # Buying 15 XRP worth: first 10 from level 1, next 5 from level 2
+    rate, depth = await pathfinder._get_buy_rate("USD", "rTest", target_xrp=Decimal("15"))
+    assert rate is not None
+    # Level 1: 10 XRP buys 10/0.5 = 20 IOU
+    # Level 2: 5 XRP buys 5/0.667 = 7.5 IOU
+    # Total: 27.5 IOU for 15 XRP, effective rate = 15/27.5 = 0.5454...
+    assert Decimal("0.54") < rate < Decimal("0.56")
+    assert depth == Decimal("30")  # 10 + 20
+
+
+# --- CLOB sell rate (now returns tuple) ---
 
 
 @pytest.mark.asyncio
@@ -166,14 +198,15 @@ async def test_get_sell_rate_success(pathfinder, mock_connection):
             "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
         }]
     }
-    rate = await pathfinder._get_sell_rate("USD", "rBitstamp")
+    rate, depth = await pathfinder._get_sell_rate("USD", "rBitstamp")
     assert rate == Decimal("0.741")
 
 
 @pytest.mark.asyncio
 async def test_get_sell_rate_empty_book(pathfinder, mock_connection):
     mock_connection.send_request.return_value = {"offers": []}
-    assert await pathfinder._get_sell_rate("USD", "rBitstamp") is None
+    rate, depth = await pathfinder._get_sell_rate("USD", "rBitstamp")
+    assert rate is None
 
 
 @pytest.mark.asyncio
@@ -191,7 +224,7 @@ async def test_get_sell_rate_skips_dust_offer(pathfinder, mock_connection):
             },
         ]
     }
-    rate = await pathfinder._get_sell_rate("CNY", "rCNY")
+    rate, depth = await pathfinder._get_sell_rate("CNY", "rCNY")
     assert rate == Decimal("0.741")  # Uses second offer, not dust
 
 
@@ -204,7 +237,8 @@ async def test_get_sell_rate_all_dust(pathfinder, mock_connection):
             "TakerPays": {"currency": "CNY", "issuer": "rCNY", "value": "0.0000001"},
         }]
     }
-    assert await pathfinder._get_sell_rate("CNY", "rCNY") is None
+    rate, depth = await pathfinder._get_sell_rate("CNY", "rCNY")
+    assert rate is None
 
 
 # --- AMM rates ---
@@ -223,10 +257,7 @@ async def test_get_amm_rates_success(pathfinder, mock_connection):
     result = await pathfinder._get_amm_rates("USD", "rBitstamp")
     assert result is not None
     buy_rate, sell_rate = result
-    # Mid price = 100000 XRP / 135000 USD ≈ 0.7407 XRP per USD
-    # Buy = mid / (1 - 0.005) = 0.7407 / 0.995 ≈ 0.7444
-    # Sell = mid * (1 - 0.005) = 0.7407 * 0.995 ≈ 0.7370
-    assert buy_rate > sell_rate  # Ask > bid
+    assert buy_rate > sell_rate
     assert Decimal("0.74") < buy_rate < Decimal("0.75")
     assert Decimal("0.73") < sell_rate < Decimal("0.74")
 
@@ -338,19 +369,19 @@ def test_check_spread_custom_path(pathfinder):
 
 @pytest.mark.asyncio
 async def test_scan_calls_per_iou(pathfinder, mock_connection):
-    """scan() makes 3 calls per IOU: buy book, sell book, amm_info."""
+    """scan() makes 3 calls per IOU (buy, sell, amm) + 1 for multi-hop."""
     pathfinder._trust_lines = [
         {"currency": "USD", "account": "rBitstamp"},
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # buy book, sell book return empty; amm_info returns no pool
+    # buy book, sell book, amm_info return empty; multi-hop returns no alternatives
     mock_connection.send_request.return_value = {"offers": []}
 
     await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
 
-    # 1 IOU x 3 calls = 3
-    assert mock_connection.send_request.call_count == 3
+    # 1 IOU x 3 calls + 1 multi-hop = 4
+    assert mock_connection.send_request.call_count == 4
 
 
 @pytest.mark.asyncio
@@ -367,7 +398,8 @@ async def test_scan_same_issuer_opportunity(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     amm_none = {"error": "actNotFound"}  # No AMM pool
-    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_none]
+    multi_hop_none = {"alternatives": []}  # No multi-hop paths
+    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_none, multi_hop_none]
 
     opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
     assert len(opps) == 1
@@ -380,7 +412,6 @@ async def test_scan_amm_improves_rate(pathfinder, mock_connection):
     pathfinder._trust_lines = [{"currency": "USD", "account": "rBitstamp"}]
     pathfinder._trust_lines_ts = 9999999999
 
-    # CLOB: ask 0.740, bid 0.730 → negative spread
     buy_book = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
         "TakerPays": "74000000",
@@ -389,19 +420,15 @@ async def test_scan_amm_improves_rate(pathfinder, mock_connection):
         "TakerGets": "73000000",
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
-    # AMM: mid = 0.740, fee 0.1% → buy 0.7407, sell 0.7393
-    # best_buy = min(CLOB 0.740, AMM 0.7407) = 0.740
-    # best_sell = max(CLOB 0.730, AMM 0.7393) = 0.7393
-    # Still negative spread (0.7393 < 0.740), so no opportunity
     amm_resp = {"amm": {
-        "amount": "74000000000",  # 74000 XRP
+        "amount": "74000000000",
         "amount2": {"currency": "USD", "issuer": "rBitstamp", "value": "100000"},
-        "trading_fee": 100,  # 0.1%
+        "trading_fee": 100,
     }}
-    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_resp]
+    multi_hop_none = {"alternatives": []}
+    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_resp, multi_hop_none]
 
     opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
-    # AMM improved sell rate from 0.730 to 0.7393 but still < buy 0.740
     assert len(opps) == 0
 
 
@@ -417,7 +444,6 @@ async def test_scan_cross_issuer_opportunity(pathfinder, mock_connection):
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # GateHub: ask 0.740 (cheap to buy)
     gh_buy = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
         "TakerPays": "74000000",
@@ -427,8 +453,6 @@ async def test_scan_cross_issuer_opportunity(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
     }]}
     gh_amm = {"error": "actNotFound"}
-
-    # Bitstamp: bid 0.760 (expensive to sell)
     bs_buy = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
         "TakerPays": "77000000",
@@ -438,17 +462,17 @@ async def test_scan_cross_issuer_opportunity(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     bs_amm = {"error": "actNotFound"}
+    multi_hop_none = {"alternatives": []}
 
-    # Order: GateHub (buy, sell, amm), Bitstamp (buy, sell, amm)
     mock_connection.send_request.side_effect = [
         gh_buy, gh_sell, gh_amm,
         bs_buy, bs_sell, bs_amm,
+        multi_hop_none,
     ]
 
     opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
 
-    # Should find cross-issuer: buy GateHub 0.700, sell Bitstamp 0.760
-    cross_opps = [o for o in opps if len(o.paths[0]) == 2]  # Two-hop paths
+    cross_opps = [o for o in opps if len(o.paths[0]) == 2]
     assert len(cross_opps) >= 1
     assert cross_opps[0].paths[0][0]["issuer"] == "rGateHub"
     assert cross_opps[0].paths[0][1]["issuer"] == "rBitstamp"
@@ -463,7 +487,6 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # GateHub: ask 0.740, bid 0.760 — best on both sides
     gh_buy = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
         "TakerPays": "74000000",
@@ -473,8 +496,6 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
     }]}
     gh_amm = {"error": "actNotFound"}
-
-    # Bitstamp: worse on both sides
     bs_buy = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
         "TakerPays": "77000000",
@@ -484,16 +505,16 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     bs_amm = {"error": "actNotFound"}
+    multi_hop_none = {"alternatives": []}
 
     mock_connection.send_request.side_effect = [
         gh_buy, gh_sell, gh_amm,
         bs_buy, bs_sell, bs_amm,
+        multi_hop_none,
     ]
 
     opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
 
-    # Cross-issuer skipped (same issuer rGateHub has best buy AND sell)
-    # Only same-issuer GateHub opportunity should exist
     cross_opps = [o for o in opps if len(o.paths[0]) == 2]
     assert len(cross_opps) == 0
 
@@ -503,6 +524,61 @@ async def test_scan_no_trust_lines(pathfinder, mock_connection):
     mock_connection.send_request.return_value = {"lines": []}
     pathfinder._trust_lines_ts = 0
     assert await pathfinder.scan(Decimal("100")) == []
+
+
+# --- Multi-hop discovery ---
+
+
+@pytest.mark.asyncio
+async def test_discover_multi_hop_finds_profitable_path(pathfinder, mock_connection):
+    """ripple_path_find returning source_amount < destination should yield opportunity."""
+    mock_connection.send_request.return_value = {
+        "alternatives": [{
+            "source_amount": "990000",  # 0.99 XRP cost
+            "paths_computed": [[
+                {"currency": "USD", "issuer": "rBitstamp", "type": 48},
+                {"currency": "EUR", "issuer": "rGateHub", "type": 48},
+            ]],
+        }]
+    }
+    opps = await pathfinder._discover_multi_hop(Decimal("1"), Decimal("0"))
+    assert len(opps) == 1
+    assert opps[0].input_xrp == Decimal("0.99")
+    assert opps[0].output_xrp == Decimal("1")
+    assert len(opps[0].paths[0]) == 2  # Multi-hop path
+
+
+@pytest.mark.asyncio
+async def test_discover_multi_hop_rejects_unprofitable(pathfinder, mock_connection):
+    """source_amount >= destination_amount means no profit."""
+    mock_connection.send_request.return_value = {
+        "alternatives": [{
+            "source_amount": "1010000",  # 1.01 XRP > 1 XRP output
+            "paths_computed": [[{"currency": "USD", "issuer": "rTest", "type": 48}]],
+        }]
+    }
+    opps = await pathfinder._discover_multi_hop(Decimal("1"), Decimal("0"))
+    assert len(opps) == 0
+
+
+# --- Targeted scan (event-driven) ---
+
+
+@pytest.mark.asyncio
+async def test_scan_pairs_targets_changed_currencies(pathfinder, mock_connection):
+    """scan_pairs only fetches rates for currencies in changed_currencies set."""
+    pathfinder._trust_lines = [
+        {"currency": "USD", "account": "rBitstamp"},
+        {"currency": "EUR", "account": "rGateHub"},
+        {"currency": "BTC", "account": "rBTC"},
+    ]
+    pathfinder._trust_lines_ts = 9999999999
+
+    # Only USD changed -- should only fetch 3 calls (buy, sell, amm) for USD
+    mock_connection.send_request.return_value = {"offers": []}
+
+    await pathfinder.scan_pairs({"USD"}, Decimal("100"))
+    assert mock_connection.send_request.call_count == 3  # Only USD's 3 calls
 
 
 # --- Deduplication ---

@@ -4,22 +4,37 @@ Scanning strategies (checked in order for each scan cycle):
 
 1. Same-issuer combined:  For each IOU, get the best buy rate (min of CLOB
    ask, AMM ask) and best sell rate (max of CLOB bid, AMM bid).  If the
-   combined best-sell > best-buy + fees → opportunity.  This catches
+   combined best-sell > best-buy + fees -> opportunity.  This catches
    cross-venue arb (e.g., buy on CLOB, sell through AMM) automatically.
 
 2. Cross-issuer:  For currencies with multiple issuers (e.g., USD via
    Bitstamp vs GateHub), buy from the cheapest issuer and sell to the
-   most expensive.  Path: XRP → IOU(cheap) → IOU(expensive) → XRP.
+   most expensive.  Path: XRP -> IOU(cheap) -> IOU(expensive) -> XRP.
+
+3. Multi-hop discovery:  Uses ripple_path_find with source=destination to
+   discover circular arb paths through 3+ hops that manual construction
+   would miss.  The XRPL server's pathfinding explores the full order book
+   + AMM + trust line graph automatically.
 
 Rate sources:
-  - CLOB: book_offers (order book, no balance dependency)
+  - CLOB: book_offers (volume-weighted across multiple book levels)
   - AMM:  amm_info (constant-product pool reserves + trading fee)
+
+Performance:
+  All 27 IOUs are fetched in parallel via asyncio.gather (3 RPC calls
+  per IOU run sequentially within each coroutine, but all 27 coroutines
+  run concurrently).  Effective scan time: ~3 round-trips instead of ~81.
+
+  Event-driven mode: scan_pairs() scans only the IOUs whose order books
+  changed in the latest ledger (triggered by book_changes stream), achieving
+  ~4-7 second reaction time.
 
 The actual execution remains a single atomic Payment transaction using
 ALL available liquidity.  The simulation gate validates the real price
 before any trade.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -28,17 +43,22 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from xrpl.models.requests import BookOffers, AccountLines, AMMInfo
+from xrpl.models.requests import BookOffers, AccountLines, AMMInfo, RipplePathFind
 
 from src.config import PROFIT_THRESHOLD, POSITION_TIERS
 from src.connection import XRPLConnection
-from src.profit_math import calculate_profit, is_profitable
+from src.profit_math import (
+    calculate_profit,
+    is_profitable,
+    get_profit_threshold,
+    calculate_dynamic_position,
+)
 
 logger = logging.getLogger(__name__)
 
 DROPS_PER_XRP = Decimal("1000000")
 
-# Cache trust lines for 5 minutes — they rarely change.
+# Cache trust lines for 5 minutes -- they rarely change.
 _TRUST_LINE_CACHE_TTL = 300
 
 # Number of offers to fetch from each side of the book.
@@ -49,8 +69,8 @@ _BOOK_DEPTH = 10
 # liquidity (e.g., 0.0001 CNY offered at 500,000 XRP/CNY).
 _MIN_OFFER_XRP = Decimal("0.1")
 
-# Maximum plausible profit percentage.  Real XRPL arb is typically 0.6–1%.
-# Anything above this is a stale/joke offer on an illiquid book — not a
+# Maximum plausible profit percentage.  Real XRPL arb is typically 0.6-1%.
+# Anything above this is a stale/joke offer on an illiquid book -- not a
 # real opportunity.  Reject it before it reaches simulation.
 _MAX_PROFIT_PCT = Decimal("5")
 
@@ -75,6 +95,8 @@ class IouRates:
     clob_sell: Optional[Decimal] = None  # CLOB bid (XRP per IOU)
     amm_buy: Optional[Decimal] = None    # AMM ask (XRP per IOU)
     amm_sell: Optional[Decimal] = None   # AMM bid (XRP per IOU)
+    clob_buy_depth_xrp: Decimal = Decimal("0")  # Total XRP liquidity on buy side
+    clob_sell_depth_xrp: Decimal = Decimal("0")  # Total XRP liquidity on sell side
 
     @property
     def best_buy(self) -> Optional[Decimal]:
@@ -90,7 +112,7 @@ class IouRates:
 
 
 class PathFinder:
-    """Multi-strategy arbitrage scanner."""
+    """Multi-strategy arbitrage scanner with parallel RPC."""
 
     def __init__(self, connection: XRPLConnection, wallet_address: str):
         self.connection = connection
@@ -111,7 +133,7 @@ class PathFinder:
         request = AccountLines(account=self.wallet_address)
         result = await self.connection.send_request(request)
         if not result or "lines" not in result:
-            logger.warning("Failed to fetch trust lines — using stale cache")
+            logger.warning("Failed to fetch trust lines -- using stale cache")
             return self._trust_lines
 
         self._trust_lines = result["lines"]
@@ -120,17 +142,20 @@ class PathFinder:
         return self._trust_lines
 
     # ------------------------------------------------------------------
-    # CLOB rate discovery (book_offers)
+    # CLOB rate discovery (volume-weighted across book levels)
     # ------------------------------------------------------------------
 
     async def _get_buy_rate(
-        self, currency: str, issuer: str
-    ) -> Optional[Decimal]:
-        """CLOB ask: XRP cost per unit of IOU (lower = cheaper to buy).
+        self, currency: str, issuer: str, target_xrp: Optional[Decimal] = None,
+    ) -> tuple[Optional[Decimal], Decimal]:
+        """CLOB ask: volume-weighted XRP cost per unit of IOU.
 
-        Scans up to _BOOK_DEPTH offers and returns the rate of the first
-        offer whose XRP side meets the _MIN_OFFER_XRP liquidity threshold.
-        This filters out dust offers placed at extreme prices.
+        When target_xrp is provided, calculates the effective rate to fill
+        that amount across multiple book levels.  Otherwise returns the
+        best qualifying offer rate (backward compatible).
+
+        Returns (rate, depth_xrp) where depth_xrp is total qualifying
+        liquidity on the book side.
         """
         request = BookOffers(
             taker_gets={"currency": currency, "issuer": issuer},
@@ -139,7 +164,9 @@ class PathFinder:
         )
         result = await self.connection.send_request(request)
         if not result or not result.get("offers"):
-            return None
+            return None, Decimal("0")
+
+        qualifying_offers: list[tuple[Decimal, Decimal]] = []  # (xrp_amount, iou_amount)
 
         for offer in result["offers"]:
             try:
@@ -153,20 +180,46 @@ class PathFinder:
                     continue
                 if xrp_amount < _MIN_OFFER_XRP:
                     continue
-                return xrp_amount / iou_amount
+                qualifying_offers.append((xrp_amount, iou_amount))
             except (InvalidOperation, ArithmeticError, TypeError) as e:
                 logger.debug(f"Buy book parse error: {e}")
                 continue
-        return None
+
+        if not qualifying_offers:
+            return None, Decimal("0")
+
+        total_depth = sum(o[0] for o in qualifying_offers)
+
+        # Volume-weighted rate across book levels for a specific trade size
+        if target_xrp is not None and target_xrp > Decimal("0"):
+            remaining = target_xrp
+            total_iou = Decimal("0")
+            for xrp_avail, iou_avail in qualifying_offers:
+                rate = xrp_avail / iou_avail
+                fill = min(remaining, xrp_avail)
+                total_iou += fill / rate
+                remaining -= fill
+                if remaining <= Decimal("0"):
+                    break
+            if total_iou > Decimal("0"):
+                return target_xrp / total_iou, total_depth
+            return None, total_depth
+
+        # Default: best qualifying offer rate
+        xrp, iou = qualifying_offers[0]
+        return xrp / iou, total_depth
 
     async def _get_sell_rate(
-        self, currency: str, issuer: str
-    ) -> Optional[Decimal]:
-        """CLOB bid: XRP received per unit of IOU (higher = better to sell).
+        self, currency: str, issuer: str, target_xrp: Optional[Decimal] = None,
+    ) -> tuple[Optional[Decimal], Decimal]:
+        """CLOB bid: volume-weighted XRP received per unit of IOU.
 
-        Scans up to _BOOK_DEPTH offers and returns the rate of the first
-        offer whose XRP side meets the _MIN_OFFER_XRP liquidity threshold.
-        This filters out dust offers placed at extreme prices.
+        When target_xrp is provided, calculates the effective rate to fill
+        that amount across multiple book levels.  Otherwise returns the
+        best qualifying offer rate (backward compatible).
+
+        Returns (rate, depth_xrp) where depth_xrp is total qualifying
+        liquidity on the book side.
         """
         request = BookOffers(
             taker_gets={"currency": "XRP"},
@@ -175,7 +228,9 @@ class PathFinder:
         )
         result = await self.connection.send_request(request)
         if not result or not result.get("offers"):
-            return None
+            return None, Decimal("0")
+
+        qualifying_offers: list[tuple[Decimal, Decimal]] = []  # (xrp_amount, iou_amount)
 
         for offer in result["offers"]:
             try:
@@ -189,11 +244,34 @@ class PathFinder:
                     continue
                 if xrp_amount < _MIN_OFFER_XRP:
                     continue
-                return xrp_amount / iou_amount
+                qualifying_offers.append((xrp_amount, iou_amount))
             except (InvalidOperation, ArithmeticError, TypeError) as e:
                 logger.debug(f"Sell book parse error: {e}")
                 continue
-        return None
+
+        if not qualifying_offers:
+            return None, Decimal("0")
+
+        total_depth = sum(o[0] for o in qualifying_offers)
+
+        # Volume-weighted rate for a specific trade size
+        if target_xrp is not None and target_xrp > Decimal("0"):
+            remaining = target_xrp
+            total_iou = Decimal("0")
+            for xrp_avail, iou_avail in qualifying_offers:
+                rate = xrp_avail / iou_avail
+                fill = min(remaining, xrp_avail)
+                total_iou += fill / rate
+                remaining -= fill
+                if remaining <= Decimal("0"):
+                    break
+            if total_iou > Decimal("0"):
+                return target_xrp / total_iou, total_depth
+            return None, total_depth
+
+        # Default: best qualifying offer rate
+        xrp, iou = qualifying_offers[0]
+        return xrp / iou, total_depth
 
     # ------------------------------------------------------------------
     # AMM rate discovery (amm_info)
@@ -207,8 +285,8 @@ class PathFinder:
         AMM uses constant-product formula: x * y = k.
         Mid-price = xrp_reserve / iou_reserve (XRP per IOU).
         The trading fee shifts the effective rate for each direction:
-          buy rate (ask)  = mid / (1 - fee)   — you pay more
-          sell rate (bid) = mid * (1 - fee)   — you receive less
+          buy rate (ask)  = mid / (1 - fee)   -- you pay more
+          sell rate (bid) = mid * (1 - fee)   -- you receive less
 
         Returns (buy_rate, sell_rate) or None if no AMM pool exists.
         """
@@ -225,36 +303,32 @@ class PathFinder:
             amount = amm.get("amount")
             amount2 = amm.get("amount2")
             fee_bps = Decimal(str(amm.get("trading_fee", 0)))
-            # trading_fee is in units of 1/100,000 (e.g., 500 = 0.5%)
             fee_ratio = fee_bps / Decimal("100000")
 
-            # Determine which side is XRP, which is IOU
             if isinstance(amount, str):
-                # amount is XRP drops, amount2 is IOU dict
                 xrp_reserve = Decimal(str(amount)) / DROPS_PER_XRP
                 if not isinstance(amount2, dict):
                     return None
                 iou_reserve = Decimal(str(amount2.get("value", "0")))
             elif isinstance(amount2, str):
-                # amount2 is XRP drops, amount is IOU dict
                 xrp_reserve = Decimal(str(amount2)) / DROPS_PER_XRP
                 if not isinstance(amount, dict):
                     return None
                 iou_reserve = Decimal(str(amount.get("value", "0")))
             else:
-                return None  # Neither side is XRP
+                return None
 
             if xrp_reserve <= Decimal("0") or iou_reserve <= Decimal("0"):
                 return None
 
-            mid_price = xrp_reserve / iou_reserve  # XRP per IOU
+            mid_price = xrp_reserve / iou_reserve
             fee_factor = Decimal("1") - fee_ratio
 
             if fee_factor <= Decimal("0"):
                 return None
 
-            buy_rate = mid_price / fee_factor   # Higher — you pay more to buy
-            sell_rate = mid_price * fee_factor  # Lower — you receive less selling
+            buy_rate = mid_price / fee_factor
+            sell_rate = mid_price * fee_factor
 
             return (buy_rate, sell_rate)
 
@@ -263,32 +337,130 @@ class PathFinder:
             return None
 
     # ------------------------------------------------------------------
-    # Rate collection
+    # Rate collection (parallel)
     # ------------------------------------------------------------------
 
     async def _collect_rates(self, trust_lines: list[dict]) -> list[IouRates]:
-        """Fetch CLOB + AMM rates for all trust-lined IOUs.
+        """Fetch CLOB + AMM rates for all trust-lined IOUs in parallel.
 
-        3 RPC calls per IOU: buy book, sell book, amm_info.
-        Total: 81 calls for 27 IOUs.
+        Each IOU requires 3 sequential RPC calls (buy book, sell book,
+        amm_info), but all 27 IOUs run concurrently via asyncio.gather.
+        The single WebSocket connection multiplexes them automatically.
+
+        Effective time: ~3 round-trips instead of ~81 sequential.
         """
-        all_rates: list[IouRates] = []
 
-        for line in trust_lines:
+        async def _fetch_one(line: dict) -> IouRates:
             currency = line["currency"]
             issuer = line["account"]
             rates = IouRates(currency=currency, issuer=issuer)
 
-            rates.clob_buy = await self._get_buy_rate(currency, issuer)
-            rates.clob_sell = await self._get_sell_rate(currency, issuer)
+            buy_result = await self._get_buy_rate(currency, issuer)
+            rates.clob_buy, rates.clob_buy_depth_xrp = buy_result
+
+            sell_result = await self._get_sell_rate(currency, issuer)
+            rates.clob_sell, rates.clob_sell_depth_xrp = sell_result
 
             amm = await self._get_amm_rates(currency, issuer)
             if amm:
                 rates.amm_buy, rates.amm_sell = amm
 
-            all_rates.append(rates)
+            return rates
 
-        return all_rates
+        results = await asyncio.gather(
+            *[_fetch_one(line) for line in trust_lines],
+            return_exceptions=True,
+        )
+
+        good_rates: list[IouRates] = []
+        for i, result in enumerate(results):
+            if isinstance(result, IouRates):
+                good_rates.append(result)
+            elif isinstance(result, Exception):
+                currency = trust_lines[i].get("currency", "?")
+                logger.debug(f"Rate fetch failed for {currency}: {result}")
+
+        return good_rates
+
+    # ------------------------------------------------------------------
+    # Multi-hop discovery via ripple_path_find
+    # ------------------------------------------------------------------
+
+    async def _discover_multi_hop(
+        self, position_xrp: Decimal, volatility_factor: Decimal,
+    ) -> list[Opportunity]:
+        """Use ripple_path_find to discover circular arb paths.
+
+        Sends XRP from our account back to ourselves, letting the XRPL
+        server's pathfinding algorithm explore the full order book + AMM +
+        trust line graph.  If source_amount < destination_amount, the path
+        is profitable.
+
+        This discovers multi-hop routes (3-6 intermediaries) that manual
+        1-hop and 2-hop path construction would miss.
+        """
+        destination_drops = str(int(position_xrp * DROPS_PER_XRP))
+
+        request = RipplePathFind(
+            source_account=self.wallet_address,
+            destination_account=self.wallet_address,
+            destination_amount=destination_drops,
+            source_currencies=[{"currency": "XRP"}],
+        )
+
+        result = await self.connection.send_request(request)
+        if not result or "alternatives" not in result:
+            return []
+
+        opportunities: list[Opportunity] = []
+
+        for alt in result["alternatives"]:
+            try:
+                source_amount = alt.get("source_amount")
+                # source_amount for XRP is a string of drops
+                if isinstance(source_amount, dict):
+                    continue  # Non-XRP source, skip
+                source_xrp = Decimal(str(source_amount)) / DROPS_PER_XRP
+                output_xrp = position_xrp
+
+                # Profitable only if we spend less than we receive
+                if source_xrp >= output_xrp:
+                    continue
+
+                profit_ratio = calculate_profit(source_xrp, output_xrp, volatility_factor)
+                if not is_profitable(source_xrp, output_xrp, volatility_factor):
+                    continue
+
+                profit_pct = profit_ratio * Decimal("100")
+
+                if profit_pct > _MAX_PROFIT_PCT:
+                    logger.debug(f"Rejected implausible multi-hop {profit_pct:.1f}%")
+                    continue
+
+                paths = alt.get("paths_computed", [])
+                if not paths:
+                    continue
+
+                logger.info(
+                    f"OPPORTUNITY [multi-hop]: {len(paths[0]) if paths else '?'} hops | "
+                    f"{profit_pct:.4f}% profit | "
+                    f"in={source_xrp:.6f} -> out={output_xrp:.6f} XRP"
+                )
+
+                opportunities.append(Opportunity(
+                    input_xrp=source_xrp,
+                    output_xrp=output_xrp,
+                    profit_pct=profit_pct,
+                    profit_ratio=profit_ratio,
+                    paths=paths,
+                    source_currency="XRP",
+                ))
+
+            except (InvalidOperation, ArithmeticError, TypeError, KeyError) as e:
+                logger.debug(f"Multi-hop parse error: {e}")
+                continue
+
+        return opportunities
 
     # ------------------------------------------------------------------
     # Path construction
@@ -308,11 +480,7 @@ class PathFinder:
     def _build_cross_issuer_path(
         currency: str, buy_issuer: str, sell_issuer: str
     ) -> list:
-        """Two-hop path: XRP -> IOU(buy_issuer) -> IOU(sell_issuer) -> XRP.
-
-        The payment engine handles the cross-issuer transfer at step 2
-        via rippling or existing cross-issuer offers.
-        """
+        """Two-hop path: XRP -> IOU(buy_issuer) -> IOU(sell_issuer) -> XRP."""
         return [[
             {
                 "currency": currency,
@@ -342,12 +510,9 @@ class PathFinder:
         volatility_factor: Decimal,
         paths: Optional[list] = None,
         label: str = "",
+        threshold: Optional[Decimal] = None,
     ) -> Optional[Opportunity]:
-        """Check if a buy/sell rate pair yields a profitable round-trip.
-
-        output_xrp = position_xrp * (sell_rate / buy_rate)
-        Profit if output > input + fees + slippage.
-        """
+        """Check if a buy/sell rate pair yields a profitable round-trip."""
         if sell_rate <= buy_rate:
             return None
 
@@ -356,13 +521,14 @@ class PathFinder:
         if output_xrp <= position_xrp:
             return None
 
+        effective_threshold = threshold if threshold is not None else get_profit_threshold(currency)
+
         profit_ratio = calculate_profit(position_xrp, output_xrp, volatility_factor)
-        if not is_profitable(position_xrp, output_xrp, volatility_factor):
+        if not is_profitable(position_xrp, output_xrp, volatility_factor, threshold=effective_threshold):
             return None
 
         profit_pct = profit_ratio * Decimal("100")
 
-        # Reject implausible profits — stale/joke offers on illiquid books
         if profit_pct > _MAX_PROFIT_PCT:
             logger.debug(
                 f"Rejected implausible {profit_pct:.1f}% on {currency}/{issuer[:8]}... "
@@ -388,64 +554,51 @@ class PathFinder:
         )
 
     # ------------------------------------------------------------------
-    # Main scan
+    # Opportunity evaluation (shared by scan and scan_pairs)
     # ------------------------------------------------------------------
 
-    async def scan(
+    def _evaluate_rates(
         self,
+        all_rates: list[IouRates],
         account_balance: Decimal,
-        volatility_factor: Decimal = Decimal("0"),
-        position_tiers: Optional[list[Decimal]] = None,
+        volatility_factor: Decimal,
+        volatility_tracker=None,
+        tiers: Optional[list[Decimal]] = None,
     ) -> list[Opportunity]:
-        """Multi-strategy scan: CLOB spreads, AMM pricing, cross-issuer.
+        """Evaluate collected rates for same-issuer and cross-issuer opportunities.
 
-        Phase 1: Collect CLOB + AMM rates for all 27 IOUs (81 RPC calls).
-        Phase 2: Same-issuer — best buy vs best sell across venues.
-        Phase 3: Cross-issuer — cheapest buy vs best sell across issuers.
-
-        Rate discovery is per-IOU (not per-tier).  Tier checks are pure math.
-
-        Args:
-            account_balance: Current XRP balance.
-            volatility_factor: 0-1 Decimal for slippage calculation.
-            position_tiers: Fraction of balance per tier (default from config).
+        Uses dynamic position sizing when volatility_tracker is available,
+        falling back to fixed POSITION_TIERS otherwise.
         """
-        tiers = position_tiers if position_tiers is not None else POSITION_TIERS
-        trust_lines = await self._fetch_trust_lines()
-
-        if not trust_lines:
-            logger.warning("No trust lines found — nothing to scan")
-            return []
-
-        # Phase 1: Collect all rates
-        all_rates = await self._collect_rates(trust_lines)
-
+        use_tiers = tiers if tiers is not None else POSITION_TIERS
         all_opps: list[Opportunity] = []
-        rated_count = 0
-        amm_count = sum(1 for r in all_rates if r.amm_buy is not None)
 
-        # Phase 2: Same-issuer combined spreads
+        # Same-issuer combined spreads
         for rates in all_rates:
             best_buy = rates.best_buy
             best_sell = rates.best_sell
             if best_buy is None or best_sell is None:
                 continue
-            rated_count += 1
 
-            for tier in tiers:
+            if volatility_tracker is not None:
+                vf = volatility_tracker.get_volatility(rates.currency)
+            else:
+                vf = volatility_factor
+
+            for tier in use_tiers:
                 position_xrp = account_balance * tier
                 if position_xrp <= Decimal("0"):
                     continue
                 opp = self._check_spread(
                     rates.currency, rates.issuer,
                     best_buy, best_sell,
-                    position_xrp, volatility_factor,
+                    position_xrp, vf,
                     label="same-issuer",
                 )
                 if opp:
                     all_opps.append(opp)
 
-        # Phase 3: Cross-issuer arbitrage
+        # Cross-issuer arbitrage
         groups: dict[str, list[IouRates]] = defaultdict(list)
         for rates in all_rates:
             if rates.best_buy is not None or rates.best_sell is not None:
@@ -455,20 +608,14 @@ class PathFinder:
             if len(issuers) < 2:
                 continue
 
-            # Find cheapest buy across all issuers of this currency
-            buy_candidates = [
-                r for r in issuers if r.best_buy is not None
-            ]
-            sell_candidates = [
-                r for r in issuers if r.best_sell is not None
-            ]
+            buy_candidates = [r for r in issuers if r.best_buy is not None]
+            sell_candidates = [r for r in issuers if r.best_sell is not None]
             if not buy_candidates or not sell_candidates:
                 continue
 
             cheapest = min(buy_candidates, key=lambda r: r.best_buy)
             richest = max(sell_candidates, key=lambda r: r.best_sell)
 
-            # Skip if same issuer — already checked in phase 2
             if cheapest.issuer == richest.issuer:
                 continue
 
@@ -476,19 +623,144 @@ class PathFinder:
                 currency, cheapest.issuer, richest.issuer,
             )
 
-            for tier in tiers:
+            if volatility_tracker is not None:
+                vf = volatility_tracker.get_volatility(currency)
+            else:
+                vf = volatility_factor
+
+            for tier in use_tiers:
                 position_xrp = account_balance * tier
                 if position_xrp <= Decimal("0"):
                     continue
                 opp = self._check_spread(
                     currency, cheapest.issuer,
                     cheapest.best_buy, richest.best_sell,
-                    position_xrp, volatility_factor,
+                    position_xrp, vf,
                     paths=cross_path,
-                    label=f"cross-issuer {cheapest.issuer[:8]}→{richest.issuer[:8]}",
+                    label=f"cross-issuer {cheapest.issuer[:8]}->{richest.issuer[:8]}",
                 )
                 if opp:
                     all_opps.append(opp)
+
+        return all_opps
+
+    # ------------------------------------------------------------------
+    # Targeted scan (event-driven, ~4-7 second latency)
+    # ------------------------------------------------------------------
+
+    async def scan_pairs(
+        self,
+        changed_currencies: set[str],
+        account_balance: Decimal,
+        volatility_tracker=None,
+    ) -> list[Opportunity]:
+        """Scan only the IOUs whose order books changed in the latest ledger.
+
+        Called by the book_changes callback when rate changes are detected.
+        This is the fast path: instead of scanning all 27 IOUs, we scan
+        only the 1-5 that actually changed, achieving ~4-7 second reaction.
+
+        Also includes cross-issuer checks when the changed currency has
+        multiple issuers (needs rates for all issuers of that currency).
+
+        Args:
+            changed_currencies: Set of currency codes that had book changes.
+            account_balance: Current XRP balance.
+            volatility_tracker: Optional VolatilityTracker instance.
+        """
+        trust_lines = await self._fetch_trust_lines()
+        if not trust_lines:
+            return []
+
+        # Find trust lines matching changed currencies.
+        # For cross-issuer, we need ALL issuers of each changed currency.
+        target_lines = [
+            line for line in trust_lines
+            if line["currency"] in changed_currencies
+        ]
+
+        if not target_lines:
+            return []
+
+        logger.debug(
+            f"Targeted scan: {len(target_lines)} IOUs for "
+            f"currencies {changed_currencies}"
+        )
+
+        # Fetch rates only for affected pairs (parallel)
+        all_rates = await self._collect_rates(target_lines)
+
+        vf = (
+            volatility_tracker.get_global_volatility()
+            if volatility_tracker else Decimal("0")
+        )
+
+        all_opps = self._evaluate_rates(
+            all_rates, account_balance, vf,
+            volatility_tracker=volatility_tracker,
+        )
+
+        if all_opps:
+            logger.info(
+                f"Targeted scan found {len(all_opps)} opportunities "
+                f"in {changed_currencies}"
+            )
+
+        return _deduplicate_opportunities(all_opps)
+
+    # ------------------------------------------------------------------
+    # Full scan (periodic fallback + multi-hop discovery)
+    # ------------------------------------------------------------------
+
+    async def scan(
+        self,
+        account_balance: Decimal,
+        volatility_factor: Decimal = Decimal("0"),
+        position_tiers: Optional[list[Decimal]] = None,
+        volatility_tracker=None,
+    ) -> list[Opportunity]:
+        """Full multi-strategy scan: CLOB, AMM, cross-issuer, and multi-hop.
+
+        Phase 1: Collect CLOB + AMM rates for all 27 IOUs (parallel RPC).
+        Phase 2: Same-issuer -- best buy vs best sell across venues.
+        Phase 3: Cross-issuer -- cheapest buy vs best sell across issuers.
+        Phase 4: Multi-hop -- ripple_path_find for circular arb discovery.
+
+        This is the periodic fallback scan (every SCAN_INTERVAL ledgers).
+        For real-time response, scan_pairs() handles changed-pair scanning.
+        """
+        tiers = position_tiers if position_tiers is not None else POSITION_TIERS
+        trust_lines = await self._fetch_trust_lines()
+
+        if not trust_lines:
+            logger.warning("No trust lines found -- nothing to scan")
+            return []
+
+        # Phase 1: Collect all rates (parallel)
+        all_rates = await self._collect_rates(trust_lines)
+
+        rated_count = sum(1 for r in all_rates if r.best_buy and r.best_sell)
+        amm_count = sum(1 for r in all_rates if r.amm_buy is not None)
+
+        # Determine global volatility
+        if volatility_tracker is not None:
+            vf = volatility_tracker.get_global_volatility()
+        else:
+            vf = volatility_factor
+
+        # Phases 2-3: Same-issuer and cross-issuer
+        all_opps = self._evaluate_rates(
+            all_rates, account_balance, vf,
+            volatility_tracker=volatility_tracker,
+            tiers=tiers,
+        )
+
+        # Phase 4: Multi-hop discovery via ripple_path_find
+        # Use the middle tier position size for multi-hop probing
+        mid_position = account_balance * tiers[len(tiers) // 2] if tiers else account_balance * Decimal("0.05")
+        if mid_position > Decimal("0"):
+            multi_hop_opps = await self._discover_multi_hop(mid_position, vf)
+            all_opps.extend(multi_hop_opps)
 
         logger.debug(
             f"Scan complete: {len(all_rates)} IOUs, {rated_count} with books, "

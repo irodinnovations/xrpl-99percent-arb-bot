@@ -25,7 +25,7 @@ from xrpl.wallet import Wallet
 
 from src.config import XRPL_RPC_URL, DRY_RUN
 from src.pathfinder import Opportunity
-from src.simulator import simulate_transaction, SimResult, HttpRpcClient
+from src.simulator import simulate_transaction, simulate_transaction_ws, SimResult, HttpRpcClient
 from src.safety import CircuitBreaker, Blacklist
 from src.trade_logger import log_trade
 from src.telegram_alerts import send_alert
@@ -82,12 +82,14 @@ class TradeExecutor:
         circuit_breaker: CircuitBreaker,
         blacklist: Blacklist,
         rpc_client: Optional[HttpRpcClient] = None,
+        connection=None,
         dry_run: bool = DRY_RUN,
     ):
         self.wallet = wallet
         self.circuit_breaker = circuit_breaker
         self.blacklist = blacklist
         self.rpc_client = rpc_client or HttpRpcClient(XRPL_RPC_URL)
+        self.connection = connection  # For WS-based simulate
         self.dry_run = dry_run
 
     async def execute(self, opportunity: Opportunity) -> bool:
@@ -108,7 +110,11 @@ class TradeExecutor:
         tx_dict = _build_tx_dict(self.wallet.address, opportunity)
 
         # SIMULATION GATE — must pass before any execution (LIVE-01, T-01-08)
-        sim_result = await simulate_transaction(tx_dict, self.rpc_client)
+        # Prefer WebSocket simulate (lower latency) with HTTP fallback
+        if self.connection and self.connection.connected:
+            sim_result = await simulate_transaction_ws(tx_dict, self.connection)
+        else:
+            sim_result = await simulate_transaction(tx_dict, self.rpc_client)
         if not sim_result.success:
             logger.warning(
                 f"Simulation FAILED ({sim_result.result_code}) — trade rejected"
@@ -137,18 +143,27 @@ class TradeExecutor:
             await log_trade(trade_data)
             return True
 
-        # LIVE EXECUTION — client-side autofill, sign, submit via JSON-RPC
+        # LIVE EXECUTION — client-side autofill, sign, submit
         # Wallet seed never leaves this process (T-01-10).
         try:
             # Step 1: Autofill — fetch Sequence and current ledger from node
-            account_info_payload = {
-                "method": "account_info",
-                "params": [{"account": self.wallet.address, "ledger_index": "current"}],
-            }
-            account_info_response = await asyncio.to_thread(
-                self.rpc_client.request, account_info_payload
-            )
-            acct_result = account_info_response.get("result", {})
+            # Prefer WebSocket (already open) over HTTP for lower latency
+            if self.connection and self.connection.connected:
+                account_info_response = await self.connection.send_raw({
+                    "command": "account_info",
+                    "account": self.wallet.address,
+                    "ledger_index": "current",
+                })
+                acct_result = account_info_response.get("result", account_info_response) if account_info_response else {}
+            else:
+                account_info_payload = {
+                    "method": "account_info",
+                    "params": [{"account": self.wallet.address, "ledger_index": "current"}],
+                }
+                account_info_response = await asyncio.to_thread(
+                    self.rpc_client.request, account_info_payload
+                )
+                acct_result = account_info_response.get("result", {})
 
             if "account_data" not in acct_result:
                 err = acct_result.get("error_message", str(acct_result))
@@ -173,14 +188,22 @@ class TradeExecutor:
             tx_dict["TxnSignature"] = signature
             tx_blob = xrpl_encode(tx_dict)
 
-            submit_payload = {
-                "method": "submit",
-                "params": [{"tx_blob": tx_blob}],
-            }
-            submit_response = await asyncio.to_thread(
-                self.rpc_client.request, submit_payload
-            )
-            submit_result = submit_response.get("result", {})
+            # Step 3: Submit — prefer WebSocket for lower latency
+            if self.connection and self.connection.connected:
+                submit_response = await self.connection.send_raw({
+                    "command": "submit",
+                    "tx_blob": tx_blob,
+                })
+                submit_result = submit_response.get("result", submit_response) if submit_response else {}
+            else:
+                submit_payload = {
+                    "method": "submit",
+                    "params": [{"tx_blob": tx_blob}],
+                }
+                submit_response = await asyncio.to_thread(
+                    self.rpc_client.request, submit_payload
+                )
+                submit_result = submit_response.get("result", {})
             engine_result = submit_result.get("engine_result", "unknown")
             tx_hash = submit_result.get("tx_json", {}).get("hash", "unknown")
 

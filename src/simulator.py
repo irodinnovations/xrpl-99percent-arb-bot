@@ -105,3 +105,55 @@ async def simulate_transaction(
     except Exception as e:
         logger.error(f"Simulate RPC error: {e}")
         return SimResult(success=False, result_code="exception", error=str(e))
+
+
+async def simulate_transaction_ws(
+    tx_dict: dict,
+    connection,
+) -> SimResult:
+    """Run simulate RPC via WebSocket instead of HTTP.
+
+    Uses the already-open WebSocket connection, eliminating the overhead of
+    asyncio.to_thread + HTTP POST per simulate call.  Same tesSUCCESS gate
+    as the HTTP version.
+
+    Falls back to HTTP simulate if the WebSocket send fails.
+
+    Args:
+        tx_dict: Raw transaction dict (must be unsigned).
+        connection: XRPLConnection instance with an active WebSocket.
+    """
+    try:
+        payload = {
+            "command": "simulate",
+            "tx_json": tx_dict,
+            "binary": False,
+        }
+        raw_response = await connection.send_raw(payload)
+
+        if raw_response is None:
+            logger.warning("WS simulate returned None — falling back to HTTP")
+            return await simulate_transaction(tx_dict)
+
+        # Check for server-level error
+        if "error" in raw_response:
+            error_msg = raw_response.get("error", {})
+            return SimResult(
+                success=False,
+                result_code="rpc_error",
+                error=str(error_msg),
+            )
+
+        result = raw_response.get("result", raw_response)
+        tx_result = result.get("meta", {}).get("TransactionResult", "unknown")
+
+        if tx_result == "tesSUCCESS":
+            logger.info("Simulation passed (WS): tesSUCCESS")
+            return SimResult(success=True, result_code=tx_result, raw=result)
+        else:
+            logger.warning(f"Simulation failed (WS): {tx_result}")
+            return SimResult(success=False, result_code=tx_result, raw=result)
+
+    except Exception as e:
+        logger.warning(f"WS simulate error: {e} — falling back to HTTP")
+        return await simulate_transaction(tx_dict)
