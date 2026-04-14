@@ -344,28 +344,33 @@ class PathFinder:
         """Fetch CLOB + AMM rates for all trust-lined IOUs in parallel.
 
         Each IOU requires 3 sequential RPC calls (buy book, sell book,
-        amm_info), but all 27 IOUs run concurrently via asyncio.gather.
-        The single WebSocket connection multiplexes them automatically.
+        amm_info).  All IOUs run concurrently via asyncio.gather, but
+        throttled by a semaphore to avoid overwhelming public XRPL nodes
+        (which return 'slowDown' error at ~15+ concurrent requests).
 
-        Effective time: ~3 round-trips instead of ~81 sequential.
+        With semaphore=5: 27 IOUs complete in ~6 batches of ~5, each batch
+        taking ~3 round-trips.  Total: ~18 round-trips in ~3-5 seconds.
         """
+        # Limit concurrency to avoid 'slowDown' rate limiting from public nodes
+        sem = asyncio.Semaphore(5)
 
         async def _fetch_one(line: dict) -> IouRates:
-            currency = line["currency"]
-            issuer = line["account"]
-            rates = IouRates(currency=currency, issuer=issuer)
+            async with sem:
+                currency = line["currency"]
+                issuer = line["account"]
+                rates = IouRates(currency=currency, issuer=issuer)
 
-            buy_result = await self._get_buy_rate(currency, issuer)
-            rates.clob_buy, rates.clob_buy_depth_xrp = buy_result
+                buy_result = await self._get_buy_rate(currency, issuer)
+                rates.clob_buy, rates.clob_buy_depth_xrp = buy_result
 
-            sell_result = await self._get_sell_rate(currency, issuer)
-            rates.clob_sell, rates.clob_sell_depth_xrp = sell_result
+                sell_result = await self._get_sell_rate(currency, issuer)
+                rates.clob_sell, rates.clob_sell_depth_xrp = sell_result
 
-            amm = await self._get_amm_rates(currency, issuer)
-            if amm:
-                rates.amm_buy, rates.amm_sell = amm
+                amm = await self._get_amm_rates(currency, issuer)
+                if amm:
+                    rates.amm_buy, rates.amm_sell = amm
 
-            return rates
+                return rates
 
         results = await asyncio.gather(
             *[_fetch_one(line) for line in trust_lines],

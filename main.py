@@ -232,7 +232,12 @@ async def main():
             logger.error(f"Book changes processing error: {e}")
 
     async def on_transaction(message: dict):
-        """Check transactions for AMM events and trigger immediate scan."""
+        """Check transactions for AMM events and trigger targeted scan.
+
+        Only scans the specific currency affected by the AMM event, not
+        all 27 IOUs.  This avoids rate limiting and focuses on the pair
+        most likely to have a mispricing.
+        """
         try:
             event = amm_detector.check_transaction(message)
             if event is None:
@@ -251,8 +256,10 @@ async def main():
                 if balance <= Decimal("0"):
                     return
 
-                opportunities = await pathfinder.scan(
-                    balance,
+                # Targeted scan: only the affected currency, not all 27
+                opportunities = await pathfinder.scan_pairs(
+                    changed_currencies={event.currency},
+                    account_balance=balance,
                     volatility_tracker=volatility_tracker,
                 )
 
