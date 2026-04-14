@@ -378,7 +378,7 @@ async def test_scan_calls_per_iou(pathfinder, mock_connection):
     # buy book, sell book, amm_info return empty; multi-hop returns no alternatives
     mock_connection.send_request.return_value = {"offers": []}
 
-    await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
+    await pathfinder.scan(Decimal("100"), )
 
     # 1 IOU x 3 calls + 1 multi-hop = 4
     assert mock_connection.send_request.call_count == 4
@@ -401,7 +401,7 @@ async def test_scan_same_issuer_opportunity(pathfinder, mock_connection):
     multi_hop_none = {"alternatives": []}  # No multi-hop paths
     mock_connection.send_request.side_effect = [buy_book, sell_book, amm_none, multi_hop_none]
 
-    opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
+    opps = await pathfinder.scan(Decimal("100"), )
     assert len(opps) == 1
     assert opps[0].output_xrp > Decimal("1")
 
@@ -428,7 +428,7 @@ async def test_scan_amm_improves_rate(pathfinder, mock_connection):
     multi_hop_none = {"alternatives": []}
     mock_connection.send_request.side_effect = [buy_book, sell_book, amm_resp, multi_hop_none]
 
-    opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
+    opps = await pathfinder.scan(Decimal("100"), )
     assert len(opps) == 0
 
 
@@ -470,7 +470,7 @@ async def test_scan_cross_issuer_opportunity(pathfinder, mock_connection):
         multi_hop_none,
     ]
 
-    opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
+    opps = await pathfinder.scan(Decimal("100"), )
 
     cross_opps = [o for o in opps if len(o.paths[0]) == 2]
     assert len(cross_opps) >= 1
@@ -513,7 +513,7 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
         multi_hop_none,
     ]
 
-    opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
+    opps = await pathfinder.scan(Decimal("100"), )
 
     cross_opps = [o for o in opps if len(o.paths[0]) == 2]
     assert len(cross_opps) == 0

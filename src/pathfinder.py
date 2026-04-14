@@ -45,7 +45,7 @@ from typing import Optional
 
 from xrpl.models.requests import BookOffers, AccountLines, AMMInfo, RipplePathFind
 
-from src.config import PROFIT_THRESHOLD, POSITION_TIERS
+from src.config import PROFIT_THRESHOLD
 from src.connection import XRPLConnection
 from src.profit_math import (
     calculate_profit,
@@ -562,20 +562,40 @@ class PathFinder:
     # Opportunity evaluation (shared by scan and scan_pairs)
     # ------------------------------------------------------------------
 
+    def _compute_position(
+        self,
+        account_balance: Decimal,
+        buy_rate: Decimal,
+        sell_rate: Decimal,
+        volatility_factor: Decimal,
+    ) -> Decimal:
+        """Compute dynamic position size based on estimated profit quality.
+
+        Does a quick profit estimate from the rates (no RPC needed), then
+        feeds that into calculate_dynamic_position() to scale the trade
+        size by opportunity quality and volatility.
+        """
+        if sell_rate <= buy_rate or buy_rate <= Decimal("0"):
+            return Decimal("0")
+        # Estimate gross profit ratio from rates alone
+        estimated_ratio = (sell_rate - buy_rate) / buy_rate
+        return calculate_dynamic_position(
+            account_balance, estimated_ratio, volatility_factor,
+        )
+
     def _evaluate_rates(
         self,
         all_rates: list[IouRates],
         account_balance: Decimal,
         volatility_factor: Decimal,
         volatility_tracker=None,
-        tiers: Optional[list[Decimal]] = None,
     ) -> list[Opportunity]:
         """Evaluate collected rates for same-issuer and cross-issuer opportunities.
 
-        Uses dynamic position sizing when volatility_tracker is available,
-        falling back to fixed POSITION_TIERS otherwise.
+        Uses dynamic position sizing: estimates profit quality from the
+        spread, then scales position between MIN_POSITION_PCT and
+        MAX_POSITION_PCT based on opportunity quality and volatility.
         """
-        use_tiers = tiers if tiers is not None else POSITION_TIERS
         all_opps: list[Opportunity] = []
 
         # Same-issuer combined spreads
@@ -590,18 +610,20 @@ class PathFinder:
             else:
                 vf = volatility_factor
 
-            for tier in use_tiers:
-                position_xrp = account_balance * tier
-                if position_xrp <= Decimal("0"):
-                    continue
-                opp = self._check_spread(
-                    rates.currency, rates.issuer,
-                    best_buy, best_sell,
-                    position_xrp, vf,
-                    label="same-issuer",
-                )
-                if opp:
-                    all_opps.append(opp)
+            position_xrp = self._compute_position(
+                account_balance, best_buy, best_sell, vf,
+            )
+            if position_xrp <= Decimal("0"):
+                continue
+
+            opp = self._check_spread(
+                rates.currency, rates.issuer,
+                best_buy, best_sell,
+                position_xrp, vf,
+                label="same-issuer",
+            )
+            if opp:
+                all_opps.append(opp)
 
         # Cross-issuer arbitrage
         groups: dict[str, list[IouRates]] = defaultdict(list)
@@ -633,19 +655,21 @@ class PathFinder:
             else:
                 vf = volatility_factor
 
-            for tier in use_tiers:
-                position_xrp = account_balance * tier
-                if position_xrp <= Decimal("0"):
-                    continue
-                opp = self._check_spread(
-                    currency, cheapest.issuer,
-                    cheapest.best_buy, richest.best_sell,
-                    position_xrp, vf,
-                    paths=cross_path,
-                    label=f"cross-issuer {cheapest.issuer[:8]}->{richest.issuer[:8]}",
-                )
-                if opp:
-                    all_opps.append(opp)
+            position_xrp = self._compute_position(
+                account_balance, cheapest.best_buy, richest.best_sell, vf,
+            )
+            if position_xrp <= Decimal("0"):
+                continue
+
+            opp = self._check_spread(
+                currency, cheapest.issuer,
+                cheapest.best_buy, richest.best_sell,
+                position_xrp, vf,
+                paths=cross_path,
+                label=f"cross-issuer {cheapest.issuer[:8]}->{richest.issuer[:8]}",
+            )
+            if opp:
+                all_opps.append(opp)
 
         return all_opps
 
@@ -721,7 +745,6 @@ class PathFinder:
         self,
         account_balance: Decimal,
         volatility_factor: Decimal = Decimal("0"),
-        position_tiers: Optional[list[Decimal]] = None,
         volatility_tracker=None,
     ) -> list[Opportunity]:
         """Full multi-strategy scan: CLOB, AMM, cross-issuer, and multi-hop.
@@ -731,10 +754,12 @@ class PathFinder:
         Phase 3: Cross-issuer -- cheapest buy vs best sell across issuers.
         Phase 4: Multi-hop -- ripple_path_find for circular arb discovery.
 
+        Position sizing is dynamic: scaled by opportunity quality and
+        volatility via calculate_dynamic_position().
+
         This is the periodic fallback scan (every SCAN_INTERVAL ledgers).
         For real-time response, scan_pairs() handles changed-pair scanning.
         """
-        tiers = position_tiers if position_tiers is not None else POSITION_TIERS
         trust_lines = await self._fetch_trust_lines()
 
         if not trust_lines:
@@ -753,16 +778,15 @@ class PathFinder:
         else:
             vf = volatility_factor
 
-        # Phases 2-3: Same-issuer and cross-issuer
+        # Phases 2-3: Same-issuer and cross-issuer (dynamic position sizing)
         all_opps = self._evaluate_rates(
             all_rates, account_balance, vf,
             volatility_tracker=volatility_tracker,
-            tiers=tiers,
         )
 
         # Phase 4: Multi-hop discovery via ripple_path_find
-        # Use the middle tier position size for multi-hop probing
-        mid_position = account_balance * tiers[len(tiers) // 2] if tiers else account_balance * Decimal("0.05")
+        # Probe at 5% of balance (middle of dynamic range)
+        mid_position = account_balance * Decimal("0.05")
         if mid_position > Decimal("0"):
             multi_hop_opps = await self._discover_multi_hop(mid_position, vf)
             all_opps.extend(multi_hop_opps)
