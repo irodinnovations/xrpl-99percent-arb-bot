@@ -35,6 +35,12 @@ class XRPLConnection:
       on_book_changes(msg: dict)          — called on each book_changes summary
     """
 
+    # Maximum concurrent RPC requests to the XRPL node.  Public nodes
+    # return 'slowDown' (error 10) at ~10-15 concurrent requests.
+    # This semaphore is shared by ALL callers (send_request + send_raw)
+    # so the limit is enforced globally, not per-scan.
+    MAX_CONCURRENT_REQUESTS = 3
+
     def __init__(self, ws_url: str = XRPL_WS_URL):
         self.ws_url = ws_url
         self.client: Optional[AsyncWebsocketClient] = None
@@ -42,6 +48,7 @@ class XRPLConnection:
         self.connected: bool = False
         self._reconnect_delay: float = 1.0
         self._max_reconnect_delay: float = 30.0
+        self._rpc_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
         self._on_ledger_callbacks: list[Callable[[int], Awaitable[None]]] = []
         self._on_transaction_callbacks: list[Callable[[dict], Awaitable[None]]] = []
         self._on_book_changes_callbacks: list[Callable[[dict], Awaitable[None]]] = []
@@ -126,12 +133,17 @@ class XRPLConnection:
                 )
 
     async def send_request(self, request) -> Optional[dict]:
-        """Send a request through the WebSocket client. Returns response result or None."""
+        """Send a request through the WebSocket client. Returns response result or None.
+
+        Rate-limited by the connection-level semaphore to prevent
+        overwhelming public XRPL nodes with concurrent requests.
+        """
         if not self.client or not self.connected:
             logger.error("Cannot send request — not connected")
             return None
         try:
-            response = await self.client.request(request)
+            async with self._rpc_semaphore:
+                response = await self.client.request(request)
             if response.is_successful():
                 return response.result
             else:
@@ -145,8 +157,8 @@ class XRPLConnection:
         """Send a raw dict as a WebSocket JSON-RPC request and await response.
 
         Bypasses xrpl-py model validation, allowing commands like 'simulate'
-        that aren't modeled in xrpl-py.  Uses the same Future-based response
-        matching as xrpl-py's internal request handling.
+        that aren't modeled in xrpl-py.  Rate-limited by the same semaphore
+        as send_request.
 
         Returns the parsed response dict, or None on error.
         """
@@ -154,7 +166,8 @@ class XRPLConnection:
             logger.error("Cannot send raw request — not connected")
             return None
         try:
-            return await send_raw_request(self.client, payload)
+            async with self._rpc_semaphore:
+                return await send_raw_request(self.client, payload)
         except TimeoutError:
             logger.error(f"Raw request timed out: {payload.get('command', '?')}")
             return None
