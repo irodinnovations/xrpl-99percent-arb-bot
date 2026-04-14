@@ -1,11 +1,13 @@
 """XRPL WebSocket connection with auto-reconnect and multi-stream subscriptions.
 
-Subscribes to three streams on connect:
-  - ledger: triggers scan cycles on each ledger close
-  - transactions: feeds AMM event detection
-  - book_changes: feeds volatility tracking
+Subscribes to two streams on connect:
+  - ledger: triggers periodic full scan cycles
+  - book_changes: feeds volatility tracking + event-driven targeted scanning
 
-Message dispatch routes incoming messages to registered callbacks by type.
+Note: the transactions stream is intentionally NOT subscribed because XRPL
+mainnet pushes hundreds of transactions per ledger (~20+/second), which floods
+the WebSocket message queue and starves RPC response processing.  AMM events
+are detected indirectly through book_changes rate shifts instead.
 """
 
 import asyncio
@@ -91,12 +93,14 @@ class XRPLConnection:
                     self._reconnect_delay = 1.0  # Reset on successful connect
                     logger.info(f"Connected to XRPL at {self.ws_url}")
 
-                    # Subscribe to all streams
+                    # Subscribe to ledger + book_changes only.
+                    # NOT subscribing to transactions — mainnet pushes
+                    # hundreds of txns per ledger, flooding the message
+                    # queue and starving RPC response processing.
                     await subscribe_streams(
                         client,
                         streams=[
                             ExtendedStreamParameter.LEDGER,
-                            ExtendedStreamParameter.TRANSACTIONS,
                             ExtendedStreamParameter.BOOK_CHANGES,
                         ],
                     )
@@ -123,13 +127,6 @@ class XRPLConnection:
                             for cb in self._on_ledger_callbacks:
                                 asyncio.create_task(self._safe_callback(
                                     cb(self.ledger_index), "ledger"
-                                ))
-
-                        # Validated transaction events
-                        elif msg_type == "transaction":
-                            for cb in self._on_transaction_callbacks:
-                                asyncio.create_task(self._safe_callback(
-                                    cb(message), "transaction"
                                 ))
 
                         # book_changes summaries (sent every ledger close)

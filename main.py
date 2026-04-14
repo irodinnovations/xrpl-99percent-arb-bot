@@ -1,22 +1,23 @@
 """XRPL 99%+ Arbitrage Bot -- main entry point.
 
-Connects to XRPL mainnet, subscribes to ledger + transactions + book_changes
-streams, scans for arbitrage opportunities with parallel RPC, validates via
+Connects to XRPL mainnet, subscribes to ledger + book_changes streams,
+scans for arbitrage opportunities with parallel RPC, validates via
 simulate RPC, and either paper-trades or live-executes.
 
-Optimization features:
-- Parallel RPC: all 27 IOUs scanned concurrently via asyncio.gather
-- Event-driven scanning: book_changes triggers targeted scan on changed pairs
-- Multi-hop discovery: ripple_path_find finds circular arb through 3+ hops
-- Real-time volatility: book_changes stream feeds per-currency volatility
-- AMM event detection: large AMM operations trigger immediate targeted scans
-- Tiered thresholds: 0.3% for high-liquidity, 0.6% for medium
-- WebSocket simulate: eliminates HTTP overhead for simulation gate
+Scanning architecture:
+- Event-driven (fast path): book_changes fires every ledger close (~4-7s),
+  triggers scan_pairs() on only the currencies whose rates changed.
+- Periodic (fallback): full scan of all 27 IOUs + multi-hop discovery via
+  ripple_path_find, every SCAN_INTERVAL ledgers.
+
+Note: the transactions stream is NOT subscribed because XRPL mainnet
+pushes hundreds of txns per ledger, flooding the WebSocket message queue.
+AMM mispricings are detected through book_changes rate shifts instead.
 
 Safety rules enforced here:
 - Bot never starts without XRPL_SECRET set (T-01-10)
 - DRY_RUN defaults to True in config -- explicit .env change required (DRY-04)
-- Top-level exception handler in on_ledger_close prevents main loop crash (T-01-11)
+- Top-level exception handler prevents main loop crash (T-01-11)
 - Circuit breaker checked every scan cycle -- halts on daily loss limit (SAFE-02)
 - asyncio.Lock prevents overlapping scans across all triggers
 """
@@ -36,7 +37,6 @@ from src.config import (
     MAX_POSITION_PCT,
     SCAN_INTERVAL,
     VOLATILITY_WINDOW,
-    AMM_MIN_IMPACT_XRP,
 )
 from src.connection import XRPLConnection
 from src.pathfinder import PathFinder
@@ -46,7 +46,6 @@ from src.trade_logger import setup_logging
 from src.telegram_alerts import send_alert
 from src.ai_brain import review_trade
 from src.volatility import VolatilityTracker
-from src.amm_detector import AMMEventDetector
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,7 @@ async def _execute_opportunities(
 ) -> None:
     """Execute opportunities and fire-and-forget AI reviews.
 
-    Shared by all scan triggers (ledger, book_changes, AMM event).
+    Shared by all scan triggers (ledger close, book_changes).
     """
     for opp in opportunities:
         label = f"{trigger} " if trigger else ""
@@ -120,12 +119,8 @@ async def main():
 
     # Initialize optimization modules
     volatility_tracker = VolatilityTracker(window_seconds=VOLATILITY_WINDOW)
-    amm_detector = AMMEventDetector(min_xrp_impact=AMM_MIN_IMPACT_XRP)
 
-    logger.info(
-        f"Volatility window: {VOLATILITY_WINDOW}s | "
-        f"AMM detection threshold: {AMM_MIN_IMPACT_XRP} XRP"
-    )
+    logger.info(f"Volatility window: {VOLATILITY_WINDOW}s")
 
     # Track ledger count; asyncio.Lock prevents overlapping scans
     ledger_count = 0
@@ -231,55 +226,15 @@ async def main():
         except Exception as e:
             logger.error(f"Book changes processing error: {e}")
 
-    async def on_transaction(message: dict):
-        """Check transactions for AMM events and trigger targeted scan.
-
-        Only scans the specific currency affected by the AMM event, not
-        all 27 IOUs.  This avoids rate limiting and focuses on the pair
-        most likely to have a mispricing.
-        """
-        try:
-            event = amm_detector.check_transaction(message)
-            if event is None:
-                return
-
-            if circuit_breaker.is_halted() or scan_lock.locked():
-                return
-
-            logger.info(
-                f"AMM event detected: {event.tx_type} on "
-                f"{event.currency}/{event.issuer[:8]}... ({event.xrp_amount:.1f} XRP)"
-            )
-
-            async with scan_lock:
-                balance = await connection.get_account_balance(wallet.address)
-                if balance <= Decimal("0"):
-                    return
-
-                # Targeted scan: only the affected currency, not all 27
-                opportunities = await pathfinder.scan_pairs(
-                    changed_currencies={event.currency},
-                    account_balance=balance,
-                    volatility_tracker=volatility_tracker,
-                )
-
-                await _execute_opportunities(
-                    opportunities, executor, DRY_RUN, trigger="amm_event"
-                )
-
-        except Exception as e:
-            logger.error(f"AMM event processing error: {e}")
-
-    # Register all stream callbacks before connecting
+    # Register stream callbacks before connecting
     connection.on_ledger_close(on_ledger_close)
     connection.on_book_changes(on_book_changes)
-    connection.on_transaction(on_transaction)
 
     # Send startup alert (gracefully skipped if Telegram not configured)
     await send_alert(
         f"Bot started | Mode: {'DRY RUN' if DRY_RUN else 'LIVE'} | "
         f"Address: {wallet.address} | "
-        f"Streams: ledger + transactions + book_changes"
+        f"Streams: ledger + book_changes"
     )
 
     logger.info("Starting XRPL connection...")
