@@ -49,6 +49,11 @@ _BOOK_DEPTH = 10
 # liquidity (e.g., 0.0001 CNY offered at 500,000 XRP/CNY).
 _MIN_OFFER_XRP = Decimal("0.1")
 
+# Maximum plausible profit percentage.  Real XRPL arb is typically 0.6–1%.
+# Anything above this is a stale/joke offer on an illiquid book — not a
+# real opportunity.  Reject it before it reaches simulation.
+_MAX_PROFIT_PCT = Decimal("5")
+
 
 @dataclass
 class Opportunity:
@@ -356,6 +361,15 @@ class PathFinder:
             return None
 
         profit_pct = profit_ratio * Decimal("100")
+
+        # Reject implausible profits — stale/joke offers on illiquid books
+        if profit_pct > _MAX_PROFIT_PCT:
+            logger.debug(
+                f"Rejected implausible {profit_pct:.1f}% on {currency}/{issuer[:8]}... "
+                f"(ask={buy_rate:.8f} bid={sell_rate:.8f})"
+            )
+            return None
+
         tag = f" [{label}]" if label else ""
         logger.info(
             f"OPPORTUNITY{tag}: {currency}/{issuer[:8]}... | "

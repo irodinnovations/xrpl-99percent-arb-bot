@@ -284,7 +284,7 @@ def test_build_cross_issuer_path():
 def test_check_spread_profitable(pathfinder):
     opp = pathfinder._check_spread(
         currency="USD", issuer="rBitstamp",
-        buy_rate=Decimal("0.700"), sell_rate=Decimal("0.750"),
+        buy_rate=Decimal("0.740"), sell_rate=Decimal("0.760"),
         position_xrp=Decimal("10"), volatility_factor=Decimal("0"),
     )
     assert opp is not None
@@ -310,12 +310,22 @@ def test_check_spread_below_threshold(pathfinder):
     assert opp is None
 
 
+def test_check_spread_rejects_implausible_profit(pathfinder):
+    """Spreads above _MAX_PROFIT_PCT (5%) are rejected as stale/joke offers."""
+    opp = pathfinder._check_spread(
+        currency="CNY", issuer="rKiCet8S",
+        buy_rate=Decimal("0.105"), sell_rate=Decimal("500000"),
+        position_xrp=Decimal("10"), volatility_factor=Decimal("0"),
+    )
+    assert opp is None
+
+
 def test_check_spread_custom_path(pathfinder):
     """Custom path (e.g., cross-issuer) should be used in the opportunity."""
     custom_path = PathFinder._build_cross_issuer_path("USD", "rA", "rB")
     opp = pathfinder._check_spread(
         currency="USD", issuer="rA",
-        buy_rate=Decimal("0.700"), sell_rate=Decimal("0.760"),
+        buy_rate=Decimal("0.740"), sell_rate=Decimal("0.760"),
         position_xrp=Decimal("10"), volatility_factor=Decimal("0"),
         paths=custom_path,
     )
@@ -350,7 +360,7 @@ async def test_scan_same_issuer_opportunity(pathfinder, mock_connection):
 
     buy_book = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
-        "TakerPays": "70000000",
+        "TakerPays": "74000000",
     }]}
     sell_book = {"offers": [{
         "TakerGets": "76000000",
@@ -361,7 +371,7 @@ async def test_scan_same_issuer_opportunity(pathfinder, mock_connection):
 
     opps = await pathfinder.scan(Decimal("100"), position_tiers=[Decimal("0.01")])
     assert len(opps) == 1
-    assert opps[0].output_xrp > Decimal("1.08")
+    assert opps[0].output_xrp > Decimal("1")
 
 
 @pytest.mark.asyncio
@@ -407,13 +417,13 @@ async def test_scan_cross_issuer_opportunity(pathfinder, mock_connection):
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # GateHub: ask 0.700 (cheap to buy)
+    # GateHub: ask 0.740 (cheap to buy)
     gh_buy = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
-        "TakerPays": "70000000",
+        "TakerPays": "74000000",
     }]}
     gh_sell = {"offers": [{
-        "TakerGets": "69000000",
+        "TakerGets": "73000000",
         "TakerPays": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
     }]}
     gh_amm = {"error": "actNotFound"}
@@ -453,10 +463,10 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # GateHub: ask 0.700, bid 0.760 — best on both sides
+    # GateHub: ask 0.740, bid 0.760 — best on both sides
     gh_buy = {"offers": [{
         "TakerGets": {"currency": "USD", "issuer": "rGateHub", "value": "100"},
-        "TakerPays": "70000000",
+        "TakerPays": "74000000",
     }]}
     gh_sell = {"offers": [{
         "TakerGets": "76000000",
@@ -470,7 +480,7 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
         "TakerPays": "77000000",
     }]}
     bs_sell = {"offers": [{
-        "TakerGets": "69000000",
+        "TakerGets": "73000000",
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     bs_amm = {"error": "actNotFound"}
