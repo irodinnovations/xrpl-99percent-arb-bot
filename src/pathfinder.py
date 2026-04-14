@@ -44,6 +44,11 @@ _TRUST_LINE_CACHE_TTL = 300
 # Number of offers to fetch from each side of the book.
 _BOOK_DEPTH = 10
 
+# Minimum XRP value an offer must have to be used for rate calculation.
+# Filters out dust/fake offers placed at absurd prices with negligible
+# liquidity (e.g., 0.0001 CNY offered at 500,000 XRP/CNY).
+_MIN_OFFER_XRP = Decimal("0.1")
+
 
 @dataclass
 class Opportunity:
@@ -116,7 +121,12 @@ class PathFinder:
     async def _get_buy_rate(
         self, currency: str, issuer: str
     ) -> Optional[Decimal]:
-        """CLOB ask: XRP cost per unit of IOU (lower = cheaper to buy)."""
+        """CLOB ask: XRP cost per unit of IOU (lower = cheaper to buy).
+
+        Scans up to _BOOK_DEPTH offers and returns the rate of the first
+        offer whose XRP side meets the _MIN_OFFER_XRP liquidity threshold.
+        This filters out dust offers placed at extreme prices.
+        """
         request = BookOffers(
             taker_gets={"currency": currency, "issuer": issuer},
             taker_pays={"currency": "XRP"},
@@ -126,25 +136,33 @@ class PathFinder:
         if not result or not result.get("offers"):
             return None
 
-        offer = result["offers"][0]
-        try:
-            gets = offer.get("TakerGets")
-            pays = offer.get("TakerPays")
-            if not isinstance(gets, dict) or isinstance(pays, dict):
-                return None
-            iou_amount = Decimal(str(gets.get("value", "0")))
-            xrp_amount = Decimal(str(pays)) / DROPS_PER_XRP
-            if iou_amount <= Decimal("0") or xrp_amount <= Decimal("0"):
-                return None
-            return xrp_amount / iou_amount
-        except (InvalidOperation, ArithmeticError, TypeError) as e:
-            logger.debug(f"Buy book parse error: {e}")
-            return None
+        for offer in result["offers"]:
+            try:
+                gets = offer.get("TakerGets")
+                pays = offer.get("TakerPays")
+                if not isinstance(gets, dict) or isinstance(pays, dict):
+                    continue
+                iou_amount = Decimal(str(gets.get("value", "0")))
+                xrp_amount = Decimal(str(pays)) / DROPS_PER_XRP
+                if iou_amount <= Decimal("0") or xrp_amount <= Decimal("0"):
+                    continue
+                if xrp_amount < _MIN_OFFER_XRP:
+                    continue
+                return xrp_amount / iou_amount
+            except (InvalidOperation, ArithmeticError, TypeError) as e:
+                logger.debug(f"Buy book parse error: {e}")
+                continue
+        return None
 
     async def _get_sell_rate(
         self, currency: str, issuer: str
     ) -> Optional[Decimal]:
-        """CLOB bid: XRP received per unit of IOU (higher = better to sell)."""
+        """CLOB bid: XRP received per unit of IOU (higher = better to sell).
+
+        Scans up to _BOOK_DEPTH offers and returns the rate of the first
+        offer whose XRP side meets the _MIN_OFFER_XRP liquidity threshold.
+        This filters out dust offers placed at extreme prices.
+        """
         request = BookOffers(
             taker_gets={"currency": "XRP"},
             taker_pays={"currency": currency, "issuer": issuer},
@@ -154,20 +172,23 @@ class PathFinder:
         if not result or not result.get("offers"):
             return None
 
-        offer = result["offers"][0]
-        try:
-            gets = offer.get("TakerGets")
-            pays = offer.get("TakerPays")
-            if isinstance(gets, dict) or not isinstance(pays, dict):
-                return None
-            xrp_amount = Decimal(str(gets)) / DROPS_PER_XRP
-            iou_amount = Decimal(str(pays.get("value", "0")))
-            if iou_amount <= Decimal("0") or xrp_amount <= Decimal("0"):
-                return None
-            return xrp_amount / iou_amount
-        except (InvalidOperation, ArithmeticError, TypeError) as e:
-            logger.debug(f"Sell book parse error: {e}")
-            return None
+        for offer in result["offers"]:
+            try:
+                gets = offer.get("TakerGets")
+                pays = offer.get("TakerPays")
+                if isinstance(gets, dict) or not isinstance(pays, dict):
+                    continue
+                xrp_amount = Decimal(str(gets)) / DROPS_PER_XRP
+                iou_amount = Decimal(str(pays.get("value", "0")))
+                if iou_amount <= Decimal("0") or xrp_amount <= Decimal("0"):
+                    continue
+                if xrp_amount < _MIN_OFFER_XRP:
+                    continue
+                return xrp_amount / iou_amount
+            except (InvalidOperation, ArithmeticError, TypeError) as e:
+                logger.debug(f"Sell book parse error: {e}")
+                continue
+        return None
 
     # ------------------------------------------------------------------
     # AMM rate discovery (amm_info)
