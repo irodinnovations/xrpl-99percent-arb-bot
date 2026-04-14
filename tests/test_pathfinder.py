@@ -124,6 +124,37 @@ async def test_get_buy_rate_unexpected_format(pathfinder, mock_connection):
     assert await pathfinder._get_buy_rate("USD", "rBitstamp") is None
 
 
+@pytest.mark.asyncio
+async def test_get_buy_rate_skips_dust_offer(pathfinder, mock_connection):
+    """Dust offer (< 0.1 XRP) should be skipped; next valid offer used."""
+    mock_connection.send_request.return_value = {
+        "offers": [
+            {  # Dust: only 50,000 drops = 0.05 XRP
+                "TakerGets": {"currency": "CNY", "issuer": "rCNY", "value": "0.0001"},
+                "TakerPays": "50000",
+            },
+            {  # Valid: 74.8M drops = 74.8 XRP
+                "TakerGets": {"currency": "CNY", "issuer": "rCNY", "value": "100"},
+                "TakerPays": "74800000",
+            },
+        ]
+    }
+    rate = await pathfinder._get_buy_rate("CNY", "rCNY")
+    assert rate == Decimal("0.748")  # Uses second offer, not dust
+
+
+@pytest.mark.asyncio
+async def test_get_buy_rate_all_dust(pathfinder, mock_connection):
+    """If all offers are dust, return None."""
+    mock_connection.send_request.return_value = {
+        "offers": [{
+            "TakerGets": {"currency": "CNY", "issuer": "rCNY", "value": "0.0001"},
+            "TakerPays": "50000",
+        }]
+    }
+    assert await pathfinder._get_buy_rate("CNY", "rCNY") is None
+
+
 # --- CLOB sell rate ---
 
 
@@ -143,6 +174,37 @@ async def test_get_sell_rate_success(pathfinder, mock_connection):
 async def test_get_sell_rate_empty_book(pathfinder, mock_connection):
     mock_connection.send_request.return_value = {"offers": []}
     assert await pathfinder._get_sell_rate("USD", "rBitstamp") is None
+
+
+@pytest.mark.asyncio
+async def test_get_sell_rate_skips_dust_offer(pathfinder, mock_connection):
+    """Dust sell offer (< 0.1 XRP) should be skipped; next valid offer used."""
+    mock_connection.send_request.return_value = {
+        "offers": [
+            {  # Dust: 50,000 drops = 0.05 XRP at absurd rate
+                "TakerGets": "50000",
+                "TakerPays": {"currency": "CNY", "issuer": "rCNY", "value": "0.0000001"},
+            },
+            {  # Valid: 74.1M drops = 74.1 XRP
+                "TakerGets": "74100000",
+                "TakerPays": {"currency": "CNY", "issuer": "rCNY", "value": "100"},
+            },
+        ]
+    }
+    rate = await pathfinder._get_sell_rate("CNY", "rCNY")
+    assert rate == Decimal("0.741")  # Uses second offer, not dust
+
+
+@pytest.mark.asyncio
+async def test_get_sell_rate_all_dust(pathfinder, mock_connection):
+    """If all sell offers are dust, return None."""
+    mock_connection.send_request.return_value = {
+        "offers": [{
+            "TakerGets": "50000",
+            "TakerPays": {"currency": "CNY", "issuer": "rCNY", "value": "0.0000001"},
+        }]
+    }
+    assert await pathfinder._get_sell_rate("CNY", "rCNY") is None
 
 
 # --- AMM rates ---
