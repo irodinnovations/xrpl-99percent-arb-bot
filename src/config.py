@@ -30,11 +30,33 @@ DAILY_LOSS_LIMIT_PCT: Decimal = Decimal(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"
 SLIPPAGE_BASE: Decimal = Decimal(os.getenv("SLIPPAGE_BASE", "0.003"))
 NETWORK_FEE: Decimal = Decimal("0.000012")  # ~12 drops, standard XRPL fee
 
-# Scan interval: run pathfinder every N ledger closes (~3-5s each).
-# 27 IOUs x 3 tiers x 2 probes = 162 path_find calls per scan, so
-# scanning every ledger would overwhelm the connection.  Default 10
-# means one full scan every ~30-50 seconds.
-SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "10"))
+# Scan interval: run FULL pathfinder every N ledger closes (~4-7s each).
+# The full scan is now a periodic fallback — event-driven scan_pairs()
+# handles the hot path every ledger close via book_changes stream.
+# Full scan includes multi-hop discovery via ripple_path_find which is
+# heavier, so we run it less frequently.  Default 8 means one full
+# scan every ~30-55 seconds.
+SCAN_INTERVAL: int = int(os.getenv("SCAN_INTERVAL", "8"))
+
+# Tiered profit thresholds by liquidity class
+PROFIT_THRESHOLD_HIGH_LIQ: Decimal = Decimal(
+    os.getenv("PROFIT_THRESHOLD_HIGH_LIQ", "0.003")
+)
+PROFIT_THRESHOLD_LOW_LIQ: Decimal = Decimal(
+    os.getenv("PROFIT_THRESHOLD_LOW_LIQ", "0.010")
+)
+HIGH_LIQ_CURRENCIES: list[str] = os.getenv(
+    "HIGH_LIQ_CURRENCIES", "USD,USDC,RLUSD,EUR"
+).split(",")
+
+# Dynamic position sizing range (MIN to MAX_POSITION_PCT)
+MIN_POSITION_PCT: Decimal = Decimal(os.getenv("MIN_POSITION_PCT", "0.01"))
+
+# Volatility tracking window (seconds)
+VOLATILITY_WINDOW: int = int(os.getenv("VOLATILITY_WINDOW", "300"))
+
+# AMM event detection minimum impact (XRP)
+AMM_MIN_IMPACT_XRP: Decimal = Decimal(os.getenv("AMM_MIN_IMPACT_XRP", "10"))
 
 # Telegram (optional)
 TELEGRAM_TOKEN: str = os.getenv("TELEGRAM_TOKEN", "")
