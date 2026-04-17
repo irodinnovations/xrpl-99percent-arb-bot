@@ -31,6 +31,36 @@ _MAX_VOLATILITY = Decimal("1")
 _NORMALIZATION_PCT = Decimal("0.05")
 
 
+def _is_xrp_side(side: str) -> bool:
+    """Return True if the currency side represents XRP.
+
+    Rippled sends "XRP_drops" in the book_changes stream; older docs and
+    other RPCs use "XRP". Accept both so we stay robust across versions.
+    """
+    return side in ("XRP", "XRP_drops")
+
+
+def _extract_currency_code(side: str) -> Optional[str]:
+    """Extract the currency code from an IOU side string.
+
+    Handles both formats we've seen in the wild:
+      "ISSUER/CURRENCY"  (current rippled book_changes)
+      "CURRENCY/ISSUER"  (older docs)
+
+    A bare rAddress is 25-35 chars base58 — anything else on the split
+    is treated as the currency. Returns None if neither side looks like
+    a currency.
+    """
+    if "/" not in side:
+        return None
+    left, right = side.split("/", 1)
+    # An XRPL address starts with 'r' and is 25-35 base58 chars.
+    # The other side is the currency (3-char code or 40-char hex).
+    if left.startswith("r") and len(left) >= 25:
+        return right or None
+    return left or None
+
+
 class VolatilityTracker:
     """Tracks per-currency rate volatility from book_changes stream messages."""
 
@@ -73,24 +103,25 @@ class VolatilityTracker:
         has currency pair info and OHLC rates.  We extract the open-to-close
         change magnitude for each affected currency.
 
-        Expected message format (from XRPL subscribe book_changes stream):
+        Real XRPL format (verified against wss://s2.ripple.com):
         {
             "type": "bookChanges",
             "ledger_index": 12345,
             "changes": [
                 {
-                    "currency_a": "XRP",
-                    "currency_b": "USD/rhub8VRN...",
-                    "volume_a": "100.5",
+                    "currency_a": "XRP_drops",
+                    "currency_b": "rIssuerAddr.../CURRENCY_HEX_OR_CODE",
+                    "volume_a": "100000000",
                     "volume_b": "50.2",
-                    "open": "2.001",
-                    "close": "2.003",
-                    "high": "2.005",
-                    "low": "1.999"
-                },
-                ...
+                    "open": "0.0000005", "close": "...",
+                    "high": "...", "low": "..."
+                }
             ]
         }
+
+        Note: the XRP sentinel is "XRP_drops" (not "XRP") and the IOU
+        format is "ISSUER/CURRENCY" with issuer first. Older docs showed
+        the reverse — we accept both to stay robust across rippled versions.
         """
         self._msgs_processed += 1
         changes = msg.get("changes", [])
@@ -99,8 +130,8 @@ class VolatilityTracker:
 
         for change in changes:
             try:
-                open_rate = change.get("open")
-                close_rate = change.get("close")
+                open_rate = change.get("open") or change.get("rate_open")
+                close_rate = change.get("close") or change.get("rate_close")
                 if not open_rate or not close_rate:
                     continue
 
@@ -110,20 +141,21 @@ class VolatilityTracker:
                 if open_dec <= Decimal("0"):
                     continue
 
-                # Fractional change magnitude
                 rate_change = abs(close_dec - open_dec) / open_dec
 
-                # Extract currency — currency_b format is "CODE/rIssuer..."
-                # or just "XRP" for the XRP side
-                currency_b = change.get("currency_b", "")
                 currency_a = change.get("currency_a", "")
+                currency_b = change.get("currency_b", "")
 
-                # Record for the non-XRP currency (that's what we trade)
-                if currency_a == "XRP" and "/" in currency_b:
-                    currency = currency_b.split("/")[0]
-                    self.record_change(currency, rate_change)
-                elif currency_b == "XRP" and "/" in currency_a:
-                    currency = currency_a.split("/")[0]
+                # Identify the IOU side (the one containing "/").
+                # The XRP side will be "XRP" or "XRP_drops".
+                if _is_xrp_side(currency_a) and "/" in currency_b:
+                    currency = _extract_currency_code(currency_b)
+                elif _is_xrp_side(currency_b) and "/" in currency_a:
+                    currency = _extract_currency_code(currency_a)
+                else:
+                    continue
+
+                if currency:
                     self.record_change(currency, rate_change)
 
             except (InvalidOperation, ArithmeticError, TypeError, ValueError):
