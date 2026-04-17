@@ -54,6 +54,11 @@ class XRPLConnection:
         self._on_ledger_callbacks: list[Callable[[int], Awaitable[None]]] = []
         self._on_transaction_callbacks: list[Callable[[dict], Awaitable[None]]] = []
         self._on_book_changes_callbacks: list[Callable[[dict], Awaitable[None]]] = []
+        # Diagnostics: count each message type seen since connect.
+        # Logged every 100 ledger closes so we can see whether the
+        # book_changes stream is actually delivering.
+        self._msg_type_counts: dict[str, int] = {}
+        self._first_book_changes_logged: bool = False
 
     def on_ledger_close(self, callback: Callable[[int], Awaitable[None]]):
         """Register a callback to be called on each ledger close."""
@@ -118,19 +123,43 @@ class XRPLConnection:
                         if not isinstance(message, dict):
                             continue
 
-                        msg_type = message.get("type")
+                        msg_type = message.get("type", "<none>")
+                        self._msg_type_counts[msg_type] = (
+                            self._msg_type_counts.get(msg_type, 0) + 1
+                        )
+
+                        # Log the very first bookChanges message so we can
+                        # confirm the stream is flowing and inspect its shape.
+                        if (
+                            not self._first_book_changes_logged
+                            and msg_type == "bookChanges"
+                        ):
+                            self._first_book_changes_logged = True
+                            change_count = len(message.get("changes") or [])
+                            logger.info(
+                                f"First bookChanges received: "
+                                f"ledger={message.get('ledger_index')}, "
+                                f"changes={change_count}"
+                            )
 
                         # Ledger close events
                         if msg_type == "ledgerClosed":
                             self.ledger_index = message.get("ledger_index", 0)
                             logger.debug(f"Ledger closed: {self.ledger_index}")
+                            # Every 100 ledgers, dump counts so we can see
+                            # whether bookChanges is actually arriving.
+                            if self.ledger_index and self.ledger_index % 100 == 0:
+                                logger.info(
+                                    f"Message type counts (since connect): "
+                                    f"{self._msg_type_counts}"
+                                )
                             for cb in self._on_ledger_callbacks:
                                 asyncio.create_task(self._safe_callback(
                                     cb(self.ledger_index), "ledger"
                                 ))
 
                         # book_changes summaries (sent every ledger close)
-                        if "changes" in message and message.get("type") == "bookChanges":
+                        if "changes" in message and msg_type == "bookChanges":
                             for cb in self._on_book_changes_callbacks:
                                 asyncio.create_task(self._safe_callback(
                                     cb(message), "book_changes"
