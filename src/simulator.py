@@ -93,7 +93,7 @@ async def simulate_transaction(
             )
 
         result = raw_response.get("result", {})
-        tx_result = result.get("meta", {}).get("TransactionResult", "unknown")
+        tx_result = _extract_result_code(result)
 
         if tx_result == "tesSUCCESS":
             logger.info("Simulation passed: tesSUCCESS")
@@ -105,6 +105,26 @@ async def simulate_transaction(
     except Exception as e:
         logger.error(f"Simulate RPC error: {e}")
         return SimResult(success=False, result_code="exception", error=str(e))
+
+
+def _extract_result_code(result: dict) -> str:
+    """Pull the transaction result code from a simulate RPC response.
+
+    The simulate RPC returns `engine_result` at the top level of the result
+    object for every response (success AND failure). `meta.TransactionResult`
+    is only populated when the transaction would have applied — on path
+    failures like tecPATH_DRY the `meta` object may be missing entirely.
+
+    Checking engine_result first is required; meta.TransactionResult is a
+    defensive fallback.
+    """
+    engine_result = result.get("engine_result")
+    if engine_result:
+        return engine_result
+    meta_result = result.get("meta", {}).get("TransactionResult")
+    if meta_result:
+        return meta_result
+    return "unknown"
 
 
 async def simulate_transaction_ws(
@@ -145,7 +165,7 @@ async def simulate_transaction_ws(
             )
 
         result = raw_response.get("result", raw_response)
-        tx_result = result.get("meta", {}).get("TransactionResult", "unknown")
+        tx_result = _extract_result_code(result)
 
         if tx_result == "tesSUCCESS":
             logger.info("Simulation passed (WS): tesSUCCESS")

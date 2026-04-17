@@ -40,6 +40,10 @@ class VolatilityTracker:
         self._changes: dict[str, deque[tuple[float, Decimal]]] = defaultdict(
             lambda: deque(maxlen=500)
         )
+        # Diagnostic counters: help verify the book_changes stream
+        # is feeding data when global volatility stays at 0.
+        self._msgs_processed: int = 0
+        self._changes_recorded: int = 0
 
     def _prune(self, currency: str) -> None:
         """Remove entries older than the rolling window."""
@@ -60,6 +64,7 @@ class VolatilityTracker:
             rate_change_ratio: Absolute fractional change (e.g., 0.003 for 0.3%).
         """
         self._changes[currency].append((time.time(), rate_change_ratio))
+        self._changes_recorded += 1
 
     def process_book_changes_message(self, msg: dict) -> None:
         """Parse a book_changes stream message and record rate changes.
@@ -87,6 +92,7 @@ class VolatilityTracker:
             ]
         }
         """
+        self._msgs_processed += 1
         changes = msg.get("changes", [])
         if not changes:
             return
@@ -163,6 +169,19 @@ class VolatilityTracker:
             if dq and dq[-1][0] >= since:
                 changed.add(currency)
         return changed
+
+    def get_diagnostics(self) -> dict:
+        """Return counters for debugging whether the tracker is receiving data.
+
+        Used by the heartbeat log so operators can tell the difference
+        between 'no volatility because markets are quiet' and 'no volatility
+        because the book_changes stream isn't wired up'.
+        """
+        return {
+            "msgs_processed": self._msgs_processed,
+            "changes_recorded": self._changes_recorded,
+            "currencies_tracked": len(self._changes),
+        }
 
     def get_global_volatility(self) -> Decimal:
         """Average volatility across all tracked currencies.
