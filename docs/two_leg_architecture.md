@@ -107,18 +107,43 @@ Same-issuer arbitrage omits `Paths` — just sells the held IOU on its native bo
 | Leg 1 validated, leg 2 validates with `tec*` | Hold IOU | **Recovery flow** |
 | Both validate with `tesSUCCESS` | Complete | Record P&L |
 
-## Mid-trade recovery flow
+## Mid-trade recovery flow (fully autonomous — never requires human)
 
-When leg 1 completes but leg 2 does not, the bot holds an IOU it did not intend to hold long-term. Recovery priority:
+When leg 1 completes but leg 2 does not, the bot holds an IOU it did not intend to hold long-term. Recovery is deterministic and self-resolving — no path requires human intervention.
 
 1. **Immediate retry leg 2** with fresh rates. If the market hasn't moved more than 0.3%, the opp is still profitable. Max 2 retry attempts with fresh `LastLedgerSequence` each time.
-2. **Fallback: market-sell at any rate.** Submit an IOU→XRP Payment with the held IOU as SendMax, targeting the best current book rate. Accept a loss of up to 2% of the trade size. This caps the downside.
-3. **If market-sell also fails twice**: halt the bot (`circuit_breaker.force_halt()`), send `CRITICAL` Telegram alert including held IOU balance, issuer, and last-known rates. Require manual intervention.
+2. **Fallback: market-dump the IOU** at any rate. Submit an IOU→XRP Payment with the held IOU as SendMax, accepting up to `RECOVERY_MAX_LOSS_PCT` (2%) of trade size as loss. This caps downside and exits the position.
+3. **If market-dump also fails twice**: auto-halt for 2 hours via circuit breaker, blacklist the route for 24 hours, send informational Telegram alert with state dump. Bot resumes trading automatically after cooldown. The held IOU remains in the wallet; on next startup, the **bot-startup recovery guard** (below) will attempt market-dump again.
 
 During recovery, the bot is in `MID_TRADE` state:
 - No new opportunities are evaluated
 - Heartbeat shows `state=MID_TRADE(leg2_pending)`
 - Scan loop is paused
+- Recovery runs on dedicated coroutine with 30s timeout per step
+
+**Telegram alerts are informational only** — the bot never waits for human input. Alerts are logged and sent, but recovery proceeds regardless.
+
+## Bot-startup recovery guard
+
+On every bot startup, scan trust lines for non-zero IOU balances. If found:
+1. Enter `MID_TRADE` state immediately
+2. Run the market-dump recovery (step 2 above)
+3. Only start normal scanning after wallet is clean (all IOU balances back to zero)
+
+This handles the case where the bot crashed or was restarted while holding an IOU from a partially-completed trade.
+
+## Autonomous halt policy
+
+All halts are **time-boxed** and **auto-resume** — no halt state requires human action:
+
+| Trigger | Halt duration | Resume condition |
+|---|---|---|
+| Daily loss ≥ 1% | 24h | Time elapsed + day boundary |
+| 3 consecutive mid-trade failures | 2h | Time elapsed |
+| Market-dump failed (recovery step 3) | 2h | Time elapsed, startup-guard re-attempts |
+| 3 consecutive sim failures on same route | Route blacklist 24h only (bot keeps trading other routes) | Time elapsed |
+
+Telegram alerts fire on all of these, but only as notifications. **The bot is designed to run unattended indefinitely.**
 
 ## Pre-simulation strategy
 
@@ -134,19 +159,28 @@ Both legs are simulated before either is submitted. This is the single most impo
 
 This means every live trade has effectively been validated against the live ledger twice before any real transaction is submitted.
 
-## Sizing changes
+## Sizing changes (optimized for autonomous operation)
 
-Non-atomic risk is priced in by raising thresholds and lowering sizes:
+Non-atomic risk is priced in by raising thresholds and lowering sizes. Values chosen to maximize consistent opportunity flow while eliminating paths that require human intervention.
 
 | Parameter | Old | New | Rationale |
 |---|---|---|---|
-| `PROFIT_THRESHOLD` | 0.006 (0.6%) | 0.010 (1.0%) | Absorb 2× slippage + recovery-fail cost amortization |
-| `PROFIT_THRESHOLD_HIGH_LIQ` | 0.003 (0.3%) | 0.006 (0.6%) | Same reasoning scaled to high-liq |
-| `MAX_POSITION_PCT` (go-live) | 0.05 (5%) | 0.02 (2%) | First 7 days live only |
+| `PROFIT_THRESHOLD` | 0.006 (0.6%) | 0.010 (1.0%) | Absorb 2× slippage + recovery-fail cost amortization. At 1%, even if 5% of trades fail recovery (capped at -2%), expected return stays strongly positive. |
+| `PROFIT_THRESHOLD_HIGH_LIQ` | 0.003 (0.3%) | 0.006 (0.6%) | Same reasoning scaled to high-liq. Still below medium-liq to capture USD/USDC/EUR opportunities. |
+| `MAX_POSITION_PCT` (first 7 days) | 0.05 (5%) | 0.02 (2%) | Caps blast radius of any single bad trade to ~2% of balance. After 7 days clean, auto-scales to 0.05. |
 | `MIN_POSITION_PCT` | 0.01 (1%) | 0.01 (1%) | Unchanged |
-| `DAILY_LOSS_LIMIT` | 0.02 (2%) | 0.01 (1%) | Stricter under non-atomic |
+| `MAX_TRADE_XRP_ABS` | — | `5.0` | **New**: absolute XRP cap per trade regardless of balance %. Defense against balance-calculation bugs. |
+| `DAILY_LOSS_LIMIT_PCT` | 0.02 (2%) | 0.01 (1%) | Halts bot 24h on 1% daily loss. Stricter under non-atomic. |
+| `MIN_BALANCE_GUARD_PCT` | — | 0.95 | **New**: skip all trades if current balance < 95% of reference. Defense against slow drain. |
 
-After 7 days of clean live trading, these can be loosened to prior levels (tracked as a follow-up).
+## Route blacklist (autonomous)
+
+`Blacklist` is extended with time-expiring entries:
+- Any route (currency + cheap_issuer + rich_issuer triple) that fails simulate 3× in 1 hour → blacklist 24h
+- Any route where mid-trade recovery fired → blacklist 24h
+- All blacklist entries **auto-expire** — they re-enter the candidate pool after their TTL
+
+This prevents the bot from repeatedly hitting the same broken path while keeping the strategy space open for profitable routes.
 
 ## Configuration additions
 
@@ -155,7 +189,19 @@ After 7 days of clean live trading, these can be loosened to prior levels (track
 LEG2_RETRY_MAX=2
 LEG2_RETRY_SPREAD_TOLERANCE=0.003   # 0.3% spread drift allowed on retry
 LEG2_TIMEOUT_LEDGERS=4              # ~20s wait for validation
-RECOVERY_MAX_LOSS_PCT=0.02          # 2% max loss on emergency market-sell
+RECOVERY_MAX_LOSS_PCT=0.02          # 2% max loss on emergency market-dump
+
+# Autonomous safety rails
+MAX_TRADE_XRP_ABS=5.0               # absolute XRP cap per trade
+MIN_BALANCE_GUARD_PCT=0.95          # skip trades if balance < 95% of reference
+MID_TRADE_HALT_HOURS=2              # cooldown after 3 mid-trade failures
+ROUTE_BLACKLIST_HOURS=24            # route auto-unblocks after this
+SIM_FAIL_BLACKLIST_COUNT=3          # consecutive sim fails before blacklist
+SIM_FAIL_WINDOW_SECONDS=3600        # sliding window for counting sim fails
+
+# Post-probation scaling (applied after 7 consecutive clean days)
+PROBATION_DAYS=7
+POST_PROBATION_MAX_POSITION_PCT=0.05  # auto-raise from 0.02 after probation
 ```
 
 ## What stays the same
