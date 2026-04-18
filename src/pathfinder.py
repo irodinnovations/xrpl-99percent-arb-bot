@@ -77,13 +77,46 @@ _MAX_PROFIT_PCT = Decimal("5")
 
 @dataclass
 class Opportunity:
-    """A single arbitrage opportunity found by the pathfinder."""
+    """A single arbitrage opportunity — executed as two sequential Payments.
+
+    XRPL forbids atomic XRP->IOU->XRP in one Payment (rippled returns
+    temBAD_SEND_XRP_MAX / temBAD_SEND_XRP_PATHS). Every opportunity is
+    therefore structured as two legs:
+
+      Leg 1: spend `input_xrp` XRP to acquire `iou_amount` of
+             `iou_currency/buy_issuer` (xrpDirect=false, legal)
+
+      Leg 2: spend the held IOU (as SendMax) to receive `output_xrp` XRP
+             routed through `sell_issuer`'s book (for cross-issuer arb)
+             or directly against `buy_issuer`'s book (for same-issuer).
+
+    The executor uses this shape to build both transactions, simulate
+    both before submitting either, and execute them sequentially with
+    tight LastLedgerSequence windows.  See docs/two_leg_architecture.md.
+    """
     input_xrp: Decimal
     output_xrp: Decimal
     profit_pct: Decimal  # As a percentage (e.g., 0.8 means 0.8%)
     profit_ratio: Decimal  # As a ratio (e.g., 0.008)
+
+    # Two-leg execution fields
+    iou_currency: str = ""          # e.g. "USD" or a hex code
+    buy_issuer: str = ""            # leg 1 destination issuer (cheap side)
+    sell_issuer: str = ""           # leg 2 routing issuer (rich side; == buy for same-issuer)
+    iou_amount: Decimal = Decimal("0")  # IOU acquired in leg 1, spent in leg 2
+
+    # Legacy field retained for multi-hop paths that still use the old
+    # single-Payment model during the transition window. New code should
+    # prefer the two-leg fields above.
     paths: list = field(default_factory=list)
     source_currency: str = "XRP"
+
+    def route_key(self) -> str:
+        """Stable key identifying this route — used by the Blacklist."""
+        return f"{self.iou_currency}|{self.buy_issuer}|{self.sell_issuer}"
+
+    def is_cross_issuer(self) -> bool:
+        return bool(self.buy_issuer) and bool(self.sell_issuer) and self.buy_issuer != self.sell_issuer
 
 
 @dataclass
@@ -511,12 +544,19 @@ class PathFinder:
         paths: Optional[list] = None,
         label: str = "",
         threshold: Optional[Decimal] = None,
+        sell_issuer: Optional[str] = None,
     ) -> Optional[Opportunity]:
-        """Check if a buy/sell rate pair yields a profitable round-trip."""
+        """Check if a buy/sell rate pair yields a profitable round-trip.
+
+        `issuer` is always the buy-side issuer (leg 1 destination).
+        `sell_issuer` is the rich-side issuer for cross-issuer arb;
+        when None, it defaults to `issuer` (same-issuer arb).
+        """
         if sell_rate <= buy_rate:
             return None
 
         output_xrp = position_xrp * sell_rate / buy_rate
+        iou_amount = position_xrp / buy_rate  # IOU acquired in leg 1
 
         if output_xrp <= position_xrp:
             return None
@@ -549,6 +589,10 @@ class PathFinder:
             output_xrp=output_xrp,
             profit_pct=profit_pct,
             profit_ratio=profit_ratio,
+            iou_currency=currency,
+            buy_issuer=issuer,
+            sell_issuer=sell_issuer if sell_issuer else issuer,
+            iou_amount=iou_amount,
             paths=paths if paths is not None else self._build_path(currency, issuer),
             source_currency="XRP",
         )
@@ -662,6 +706,7 @@ class PathFinder:
                 position_xrp, vf,
                 paths=cross_path,
                 label=f"cross-issuer {cheapest.issuer[:8]}->{richest.issuer[:8]}",
+                sell_issuer=richest.issuer,
             )
             if opp:
                 all_opps.append(opp)
