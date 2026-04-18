@@ -369,19 +369,23 @@ def test_check_spread_custom_path(pathfinder):
 
 @pytest.mark.asyncio
 async def test_scan_calls_per_iou(pathfinder, mock_connection):
-    """scan() makes 3 calls per IOU (buy, sell, amm) + 1 for multi-hop."""
+    """scan() makes 3 calls per IOU (buy book, sell book, amm_info).
+
+    Multi-hop discovery via ripple_path_find was removed in Phase B4
+    because its output (circular 3+ hop paths) cannot execute as two
+    Payments — only the three per-IOU calls remain.
+    """
     pathfinder._trust_lines = [
         {"currency": "USD", "account": "rBitstamp"},
     ]
     pathfinder._trust_lines_ts = 9999999999
 
-    # buy book, sell book, amm_info return empty; multi-hop returns no alternatives
     mock_connection.send_request.return_value = {"offers": []}
 
     await pathfinder.scan(Decimal("100"), )
 
-    # 1 IOU x 3 calls + 1 multi-hop = 4
-    assert mock_connection.send_request.call_count == 4
+    # 1 IOU x 3 calls = 3 (no more +1 multi-hop)
+    assert mock_connection.send_request.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -398,12 +402,16 @@ async def test_scan_same_issuer_opportunity(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     amm_none = {"error": "actNotFound"}  # No AMM pool
-    multi_hop_none = {"alternatives": []}  # No multi-hop paths
-    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_none, multi_hop_none]
+    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_none]
 
     opps = await pathfinder.scan(Decimal("100"), )
     assert len(opps) == 1
     assert opps[0].output_xrp > Decimal("1")
+    # Post-B4 invariant: every emitted opp must carry two-leg metadata
+    assert opps[0].iou_currency == "USD"
+    assert opps[0].buy_issuer == "rBitstamp"
+    assert opps[0].sell_issuer == "rBitstamp"
+    assert opps[0].iou_amount > Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -425,8 +433,7 @@ async def test_scan_amm_improves_rate(pathfinder, mock_connection):
         "amount2": {"currency": "USD", "issuer": "rBitstamp", "value": "100000"},
         "trading_fee": 100,
     }}
-    multi_hop_none = {"alternatives": []}
-    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_resp, multi_hop_none]
+    mock_connection.send_request.side_effect = [buy_book, sell_book, amm_resp]
 
     opps = await pathfinder.scan(Decimal("100"), )
     assert len(opps) == 0
@@ -462,12 +469,10 @@ async def test_scan_cross_issuer_opportunity(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     bs_amm = {"error": "actNotFound"}
-    multi_hop_none = {"alternatives": []}
 
     mock_connection.send_request.side_effect = [
         gh_buy, gh_sell, gh_amm,
         bs_buy, bs_sell, bs_amm,
-        multi_hop_none,
     ]
 
     opps = await pathfinder.scan(Decimal("100"), )
@@ -505,12 +510,10 @@ async def test_scan_cross_issuer_skips_same_issuer(pathfinder, mock_connection):
         "TakerPays": {"currency": "USD", "issuer": "rBitstamp", "value": "100"},
     }]}
     bs_amm = {"error": "actNotFound"}
-    multi_hop_none = {"alternatives": []}
 
     mock_connection.send_request.side_effect = [
         gh_buy, gh_sell, gh_amm,
         bs_buy, bs_sell, bs_amm,
-        multi_hop_none,
     ]
 
     opps = await pathfinder.scan(Decimal("100"), )
@@ -524,41 +527,6 @@ async def test_scan_no_trust_lines(pathfinder, mock_connection):
     mock_connection.send_request.return_value = {"lines": []}
     pathfinder._trust_lines_ts = 0
     assert await pathfinder.scan(Decimal("100")) == []
-
-
-# --- Multi-hop discovery ---
-
-
-@pytest.mark.asyncio
-async def test_discover_multi_hop_finds_profitable_path(pathfinder, mock_connection):
-    """ripple_path_find returning source_amount < destination should yield opportunity."""
-    mock_connection.send_request.return_value = {
-        "alternatives": [{
-            "source_amount": "990000",  # 0.99 XRP cost
-            "paths_computed": [[
-                {"currency": "USD", "issuer": "rBitstamp", "type": 48},
-                {"currency": "EUR", "issuer": "rGateHub", "type": 48},
-            ]],
-        }]
-    }
-    opps = await pathfinder._discover_multi_hop(Decimal("1"), Decimal("0"))
-    assert len(opps) == 1
-    assert opps[0].input_xrp == Decimal("0.99")
-    assert opps[0].output_xrp == Decimal("1")
-    assert len(opps[0].paths[0]) == 2  # Multi-hop path
-
-
-@pytest.mark.asyncio
-async def test_discover_multi_hop_rejects_unprofitable(pathfinder, mock_connection):
-    """source_amount >= destination_amount means no profit."""
-    mock_connection.send_request.return_value = {
-        "alternatives": [{
-            "source_amount": "1010000",  # 1.01 XRP > 1 XRP output
-            "paths_computed": [[{"currency": "USD", "issuer": "rTest", "type": 48}]],
-        }]
-    }
-    opps = await pathfinder._discover_multi_hop(Decimal("1"), Decimal("0"))
-    assert len(opps) == 0
 
 
 # --- Targeted scan (event-driven) ---

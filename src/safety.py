@@ -3,14 +3,28 @@
 SAFE-04: All financial math in this module uses decimal.Decimal — no float.
 SAFE-05: Wallet seed is loaded in config.py from .env only — never hardcoded.
 DRY-04: DRY_RUN defaults to True in config.py — explicit change required.
+
+B5 two-leg additions
+--------------------
+- Route-keyed blacklist entries with TTL-based auto-expiry so the bot
+  can block broken routes without human intervention.
+- Sim-failure sliding-window counter: N failures within a time window
+  on the same route auto-triggers a route block.
+- Legacy per-currency/issuer blacklist kept for main.py compatibility.
 """
 
 import logging
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
-from src.config import DAILY_LOSS_LIMIT_PCT
+from src.config import (
+    DAILY_LOSS_LIMIT_PCT,
+    ROUTE_BLACKLIST_HOURS,
+    SIM_FAIL_BLACKLIST_COUNT,
+    SIM_FAIL_WINDOW_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,17 +127,43 @@ class CircuitBreaker:
 
 
 class Blacklist:
-    """Path and currency blacklist to avoid known-bad or manipulated routes.
+    """Route and currency blacklist with time-expiring entries.
+
+    Three block layers coexist:
+      1. Permanent currency/issuer blocklist (add_currency) — checked by
+         is_blacklisted(paths). Used by main.py for known-bad issuers.
+      2. Route-keyed time-expiring block (block_route + is_route_blocked).
+         Auto-clears after ROUTE_BLACKLIST_HOURS. Fed by recovery flow
+         and sim-failure counter.
+      3. Sliding-window sim-failure counter (record_sim_failure). N fails
+         within SIM_FAIL_WINDOW_SECONDS auto-triggers a route block.
 
     SAFE-03: Prevents trading on known-bad or manipulated routes.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        route_ttl_hours: int = ROUTE_BLACKLIST_HOURS,
+        sim_fail_threshold: int = SIM_FAIL_BLACKLIST_COUNT,
+        sim_fail_window_seconds: int = SIM_FAIL_WINDOW_SECONDS,
+    ):
+        # Legacy permanent blocklist
         self._blacklisted_currencies: set[str] = set()
         self._blacklisted_issuers: set[str] = set()
+        # Route-keyed TTL blocks (new in B5)
+        self._route_expiry: dict[str, datetime] = {}
+        self._route_ttl_hours = route_ttl_hours
+        # Sliding-window sim failure timestamps per route
+        self._sim_failures: dict[str, deque] = defaultdict(deque)
+        self._sim_fail_threshold = sim_fail_threshold
+        self._sim_fail_window_seconds = sim_fail_window_seconds
+
+    # ------------------------------------------------------------------
+    # Permanent currency/issuer blacklist (legacy — used by main.py)
+    # ------------------------------------------------------------------
 
     def add_currency(self, currency: str, issuer: str = ""):
-        """Add a currency (and optionally issuer) to the blacklist."""
+        """Add a currency (and optionally issuer) to the permanent blacklist."""
         self._blacklisted_currencies.add(currency.upper())
         if issuer:
             self._blacklisted_issuers.add(issuer)
@@ -132,8 +172,8 @@ class Blacklist:
     def is_blacklisted(self, paths: list) -> bool:
         """Check if any path step involves a blacklisted currency or issuer.
 
-        paths: List of path arrays from ripple_path_find response.
-        Returns True if any blacklisted currency/issuer found.
+        paths: list of path arrays from pathfinder.  Returns True on any
+        match against the permanent currency/issuer blocklist.
         """
         if not self._blacklisted_currencies and not self._blacklisted_issuers:
             return False
@@ -152,3 +192,57 @@ class Blacklist:
                             return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # Route-keyed time-expiring blocks (B5)
+    # ------------------------------------------------------------------
+
+    def block_route(self, route_key: str, hours: Optional[int] = None) -> None:
+        """Block a route for `hours` (default: ROUTE_BLACKLIST_HOURS).
+
+        Idempotent — re-blocking an active route extends the expiry.
+        """
+        ttl = hours if hours is not None else self._route_ttl_hours
+        expiry = _utcnow() + timedelta(hours=ttl)
+        self._route_expiry[route_key] = expiry
+        logger.warning(
+            f"Route blacklisted for {ttl}h until {expiry.isoformat()}: {route_key}"
+        )
+
+    def is_route_blocked(self, route_key: str) -> bool:
+        """True if the route is currently blocked. Auto-purges expired entries."""
+        self._purge_expired_routes()
+        return route_key in self._route_expiry
+
+    def record_sim_failure(self, route_key: str) -> bool:
+        """Record one sim failure on `route_key`.
+
+        If the route hits `sim_fail_threshold` failures within
+        `sim_fail_window_seconds`, the route is automatically blocked
+        and the counter is cleared. Returns True iff that auto-block
+        fired on this call.
+        """
+        now = _utcnow()
+        cutoff = now - timedelta(seconds=self._sim_fail_window_seconds)
+        failures = self._sim_failures[route_key]
+
+        while failures and failures[0] < cutoff:
+            failures.popleft()
+
+        failures.append(now)
+        if len(failures) >= self._sim_fail_threshold:
+            logger.critical(
+                f"Route hit {len(failures)} sim failures within "
+                f"{self._sim_fail_window_seconds}s — auto-blocking"
+            )
+            self.block_route(route_key)
+            failures.clear()
+            return True
+        return False
+
+    def _purge_expired_routes(self) -> None:
+        now = _utcnow()
+        expired = [k for k, exp in self._route_expiry.items() if now >= exp]
+        for k in expired:
+            del self._route_expiry[k]
+            logger.info(f"Route blacklist expired, re-allowed: {k}")

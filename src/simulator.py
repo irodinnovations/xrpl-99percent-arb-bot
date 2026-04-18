@@ -5,12 +5,20 @@ bypassing xrpl-py model validation (which rejects cross-currency tx dicts
 before they reach the network). The simulate RPC accepts raw tx_json dicts.
 
 T-01-08: Only exact string "tesSUCCESS" in meta.TransactionResult is accepted.
+
+Two-leg pre-simulation
+----------------------
+For two-leg arbitrage the executor calls `simulate_transaction` twice per
+opportunity: leg 1 (XRP->IOU) and leg 2 (IOU->XRP) with Sequence+1. Leg 2
+is parameterized from leg 1's `delivered_amount`, which this module exposes
+as a typed field on SimResult so callers do not need to dig into raw meta.
 """
 
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from decimal import Decimal, InvalidOperation
+from typing import Any, Optional, Protocol
 
 import requests as http_requests
 
@@ -21,11 +29,59 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SimResult:
-    """Result of a simulate RPC call."""
+    """Result of a simulate RPC call.
+
+    `delivered_amount` is auto-populated from meta.delivered_amount and is
+    None when the transaction didn't apply, the field was absent, or it
+    was an XRP string (leg-1 arbitrage always expects an IOU dict).
+    """
     success: bool
     result_code: str
     raw: Optional[dict] = None
     error: Optional[str] = None
+    delivered_amount: Optional[dict] = None  # IOU dict: {currency, issuer, value}
+
+    def delivered_iou_value(self) -> Optional[Decimal]:
+        """Return the Decimal value of an IOU delivery, or None.
+
+        Returns None when:
+          - sim did not succeed (no meta.delivered_amount),
+          - delivered_amount was XRP drops (a string, not a dict),
+          - the value string was malformed or zero.
+        """
+        return extract_delivered_iou(self.delivered_amount)
+
+
+def extract_delivered_iou(delivered_amount: Any) -> Optional[Decimal]:
+    """Parse an XRPL delivered_amount value into a positive Decimal.
+
+    Accepts either the meta.delivered_amount field directly (IOU dict or
+    XRP drops string) or None. Returns None for XRP deliveries, missing
+    fields, malformed values, and non-positive amounts.
+    """
+    if not isinstance(delivered_amount, dict):
+        return None
+    value = delivered_amount.get("value")
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if parsed <= Decimal("0"):
+        return None
+    return parsed
+
+
+def _pull_delivered_amount(result: dict) -> Optional[dict]:
+    """Return meta.delivered_amount as a dict, or None for XRP / missing."""
+    if not isinstance(result, dict):
+        return None
+    meta = result.get("meta") or {}
+    delivered = meta.get("delivered_amount")
+    if isinstance(delivered, dict):
+        return delivered
+    return None
 
 
 class RpcClientProtocol(Protocol):
@@ -95,12 +151,19 @@ async def simulate_transaction(
         result = raw_response.get("result", {})
         tx_result = _extract_result_code(result)
 
+        delivered = _pull_delivered_amount(result)
         if tx_result == "tesSUCCESS":
             logger.info("Simulation passed: tesSUCCESS")
-            return SimResult(success=True, result_code=tx_result, raw=result)
+            return SimResult(
+                success=True, result_code=tx_result, raw=result,
+                delivered_amount=delivered,
+            )
         else:
             logger.warning(f"Simulation failed: {tx_result}")
-            return SimResult(success=False, result_code=tx_result, raw=result)
+            return SimResult(
+                success=False, result_code=tx_result, raw=result,
+                delivered_amount=delivered,
+            )
 
     except Exception as e:
         logger.error(f"Simulate RPC error: {e}")
@@ -167,12 +230,19 @@ async def simulate_transaction_ws(
         result = raw_response.get("result", raw_response)
         tx_result = _extract_result_code(result)
 
+        delivered = _pull_delivered_amount(result)
         if tx_result == "tesSUCCESS":
             logger.info("Simulation passed (WS): tesSUCCESS")
-            return SimResult(success=True, result_code=tx_result, raw=result)
+            return SimResult(
+                success=True, result_code=tx_result, raw=result,
+                delivered_amount=delivered,
+            )
         else:
             logger.warning(f"Simulation failed (WS): {tx_result}")
-            return SimResult(success=False, result_code=tx_result, raw=result)
+            return SimResult(
+                success=False, result_code=tx_result, raw=result,
+                delivered_amount=delivered,
+            )
 
     except Exception as e:
         logger.warning(f"WS simulate error: {e} — falling back to HTTP")

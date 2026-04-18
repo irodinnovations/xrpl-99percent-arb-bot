@@ -19,16 +19,73 @@ XRPL_WS_URL: str = _ws_url
 
 XRPL_RPC_URL: str = os.getenv("XRPL_RPC_URL", "https://s1.ripple.com")
 
-# Trading — all financial values as Decimal
+# Trading — all financial values as Decimal.
+#
+# Two-leg rewrite (Apr 2026) raised the default profit threshold from
+# 0.6% to 1.0% and dropped default position from 5% to 2%. The new
+# defaults price in the non-atomic risk of two sequential Payments; if
+# your .env overrides these, keep them at/above the new defaults.
 DRY_RUN: bool = os.getenv("DRY_RUN", "True").lower() in ("true", "1", "yes")
-PROFIT_THRESHOLD: Decimal = Decimal(os.getenv("PROFIT_THRESHOLD", "0.006"))
-MAX_POSITION_PCT: Decimal = Decimal(os.getenv("MAX_POSITION_PCT", "0.05"))
+PROFIT_THRESHOLD: Decimal = Decimal(os.getenv("PROFIT_THRESHOLD", "0.010"))
+MAX_POSITION_PCT: Decimal = Decimal(os.getenv("MAX_POSITION_PCT", "0.02"))
 # Multi-tier scanning: probe at multiple position sizes per ledger cycle
-# to surface opportunities at different trade amounts (1%, 5%, 10% of balance).
-POSITION_TIERS: list[Decimal] = [Decimal("0.01"), Decimal("0.05"), Decimal("0.10")]
-DAILY_LOSS_LIMIT_PCT: Decimal = Decimal(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))
+# to surface opportunities at different trade amounts (1%, 2%, 5% of balance).
+POSITION_TIERS: list[Decimal] = [Decimal("0.01"), Decimal("0.02"), Decimal("0.05")]
+DAILY_LOSS_LIMIT_PCT: Decimal = Decimal(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.01"))
 SLIPPAGE_BASE: Decimal = Decimal(os.getenv("SLIPPAGE_BASE", "0.003"))
 NETWORK_FEE: Decimal = Decimal("0.000012")  # ~12 drops, standard XRPL fee
+
+# --- Two-leg execution tuning (see docs/two_leg_architecture.md) ---
+
+# Recovery flow: retry leg 2 up to this many times with a fresh LLS.
+LEG2_RETRY_MAX: int = int(os.getenv("LEG2_RETRY_MAX", "2"))
+
+# Max allowable spread drift on leg 2 retry before bailing to market-dump.
+LEG2_RETRY_SPREAD_TOLERANCE: Decimal = Decimal(
+    os.getenv("LEG2_RETRY_SPREAD_TOLERANCE", "0.003")
+)
+
+# LastLedgerSequence window (in ledgers) for each leg's validation deadline.
+LEG2_TIMEOUT_LEDGERS: int = int(os.getenv("LEG2_TIMEOUT_LEDGERS", "4"))
+
+# Maximum loss accepted during emergency IOU market-dump recovery.
+RECOVERY_MAX_LOSS_PCT: Decimal = Decimal(
+    os.getenv("RECOVERY_MAX_LOSS_PCT", "0.02")
+)
+
+# --- Autonomous safety rails ---
+
+# Absolute XRP cap per trade regardless of MAX_POSITION_PCT. Final line of
+# defense against balance-calculation bugs — no trade ever exceeds this.
+MAX_TRADE_XRP_ABS: Decimal = Decimal(os.getenv("MAX_TRADE_XRP_ABS", "5.0"))
+
+# Skip all trades if current balance falls below this fraction of the
+# reference balance. Defense against slow drain or balance corruption.
+MIN_BALANCE_GUARD_PCT: Decimal = Decimal(
+    os.getenv("MIN_BALANCE_GUARD_PCT", "0.95")
+)
+
+# Cooldown after 3 consecutive mid-trade recovery failures.
+MID_TRADE_HALT_HOURS: int = int(os.getenv("MID_TRADE_HALT_HOURS", "2"))
+
+# TTL for blacklisted routes — auto-expiry after this duration.
+ROUTE_BLACKLIST_HOURS: int = int(os.getenv("ROUTE_BLACKLIST_HOURS", "24"))
+
+# Consecutive sim failures on the same route before blacklisting.
+SIM_FAIL_BLACKLIST_COUNT: int = int(os.getenv("SIM_FAIL_BLACKLIST_COUNT", "3"))
+
+# Sliding window for counting sim failures (seconds).
+SIM_FAIL_WINDOW_SECONDS: int = int(os.getenv("SIM_FAIL_WINDOW_SECONDS", "3600"))
+
+# --- Post-probation scaling ---
+
+# Number of consecutive clean days before position cap relaxes.
+PROBATION_DAYS: int = int(os.getenv("PROBATION_DAYS", "7"))
+
+# Maximum position after successful probation completion.
+POST_PROBATION_MAX_POSITION_PCT: Decimal = Decimal(
+    os.getenv("POST_PROBATION_MAX_POSITION_PCT", "0.05")
+)
 
 # Scan interval: run FULL pathfinder every N ledger closes (~4-7s each).
 # The full scan is now a periodic fallback — event-driven scan_pairs()

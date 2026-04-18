@@ -8,29 +8,40 @@ from src.safety import CircuitBreaker, Blacklist
 
 
 class TestCircuitBreaker:
+    # These tests pin loss_limit_pct to 0.02 explicitly so they remain
+    # stable regardless of the config default (which the two-leg rewrite
+    # tightened from 2% to 1%). Other tests exercise the default limit.
+    _LIMIT = Decimal("0.02")
+
+    def _cb(self):
+        return CircuitBreaker(
+            account_address="rTest",
+            reference_balance=Decimal("100"),
+            loss_limit_pct=self._LIMIT,
+        )
+
     def test_not_halted_initially(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
-        assert cb.is_halted() is False
+        assert self._cb().is_halted() is False
 
     def test_halted_after_loss_limit(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         # 2% of 100 = 2 XRP loss triggers halt
         cb.record_trade(Decimal("-2"))
         assert cb.is_halted() is True
 
     def test_not_halted_with_small_loss(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         cb.record_trade(Decimal("-1"))  # 1% loss, under 2% limit
         assert cb.is_halted() is False
 
     def test_accumulates_losses(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         cb.record_trade(Decimal("-1"))
         cb.record_trade(Decimal("-1"))  # Now at -2 XRP = 2% of 100
         assert cb.is_halted() is True
 
     def test_gains_offset_losses(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         cb.record_trade(Decimal("-1.5"))
         cb.record_trade(Decimal("1"))  # Net = -0.5 XRP
         assert cb.is_halted() is False
@@ -88,3 +99,85 @@ class TestBlacklist:
         bl = Blacklist()
         bl.add_currency("SCAM")
         assert bl.is_blacklisted([]) is False
+
+
+class TestBlacklistRouteBlocking:
+    """Route-keyed time-expiring blocks added in Phase B5."""
+
+    def test_route_not_blocked_by_default(self):
+        bl = Blacklist()
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+
+    def test_block_route_sets_entry(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        assert bl.is_route_blocked("USD|rBuy|rSell") is True
+
+    def test_different_route_unaffected(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        assert bl.is_route_blocked("EUR|rOther|rOther") is False
+
+    def test_block_route_auto_expires(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        # Simulate expiry by backdating the stored timestamp
+        bl._route_expiry["USD|rBuy|rSell"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        )
+        # First call triggers purge and auto-clears expired entry
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+        assert "USD|rBuy|rSell" not in bl._route_expiry
+
+    def test_block_route_reblock_extends(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=1)
+        first_expiry = bl._route_expiry["USD|rBuy|rSell"]
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        second_expiry = bl._route_expiry["USD|rBuy|rSell"]
+        assert second_expiry > first_expiry
+
+
+class TestBlacklistSimFailureCounter:
+    """Sliding-window auto-blocklist: N sim fails → route blocked."""
+
+    def test_first_failure_does_not_block(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        triggered = bl.record_sim_failure("USD|rBuy|rSell")
+        assert triggered is False
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+
+    def test_threshold_reached_auto_blocks(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        bl.record_sim_failure("USD|rBuy|rSell")
+        bl.record_sim_failure("USD|rBuy|rSell")
+        triggered = bl.record_sim_failure("USD|rBuy|rSell")
+        assert triggered is True
+        assert bl.is_route_blocked("USD|rBuy|rSell") is True
+
+    def test_block_clears_counter(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        for _ in range(3):
+            bl.record_sim_failure("USD|rBuy|rSell")
+        # Counter is cleared after triggering a block
+        assert len(bl._sim_failures["USD|rBuy|rSell"]) == 0
+
+    def test_old_failures_outside_window_pruned(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=60)
+        # Two failures 10 minutes ago → outside the 60s window
+        old_ts = datetime.now(timezone.utc) - timedelta(minutes=10)
+        bl._sim_failures["USD|rBuy|rSell"].append(old_ts)
+        bl._sim_failures["USD|rBuy|rSell"].append(old_ts)
+        # New failure should NOT trigger — old ones get pruned
+        triggered = bl.record_sim_failure("USD|rBuy|rSell")
+        assert triggered is False
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+
+    def test_different_routes_counted_separately(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        for _ in range(2):
+            bl.record_sim_failure("USD|rA|rB")
+            bl.record_sim_failure("EUR|rC|rD")
+        # Each route has 2 failures — neither at threshold
+        assert bl.is_route_blocked("USD|rA|rB") is False
+        assert bl.is_route_blocked("EUR|rC|rD") is False
