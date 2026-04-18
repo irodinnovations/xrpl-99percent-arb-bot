@@ -55,15 +55,18 @@ def test_calculate_slippage_with_volatility():
 
 
 def test_position_size_basic():
+    # Two-leg rewrite dropped default MAX_POSITION_PCT from 5% to 2%
+    # during the initial probation window (see config.py).
     size = calculate_position_size(Decimal("100"))
-    assert size == Decimal("5")  # 5% of 100
+    assert size == Decimal("2")  # 2% of 100
     assert isinstance(size, Decimal)
 
 
-def test_position_size_never_exceeds_five_percent():
+def test_position_size_never_exceeds_max_position_pct():
+    from src.config import MAX_POSITION_PCT
     size = calculate_position_size(Decimal("1000"))
-    assert size == Decimal("50")  # exactly 5%
-    assert size <= Decimal("1000") * Decimal("0.05")
+    assert size == Decimal("1000") * MAX_POSITION_PCT
+    assert size <= Decimal("1000") * MAX_POSITION_PCT
 
 
 def test_fee_ratio_scales_with_trade_size():

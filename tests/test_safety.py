@@ -8,29 +8,40 @@ from src.safety import CircuitBreaker, Blacklist
 
 
 class TestCircuitBreaker:
+    # These tests pin loss_limit_pct to 0.02 explicitly so they remain
+    # stable regardless of the config default (which the two-leg rewrite
+    # tightened from 2% to 1%). Other tests exercise the default limit.
+    _LIMIT = Decimal("0.02")
+
+    def _cb(self):
+        return CircuitBreaker(
+            account_address="rTest",
+            reference_balance=Decimal("100"),
+            loss_limit_pct=self._LIMIT,
+        )
+
     def test_not_halted_initially(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
-        assert cb.is_halted() is False
+        assert self._cb().is_halted() is False
 
     def test_halted_after_loss_limit(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         # 2% of 100 = 2 XRP loss triggers halt
         cb.record_trade(Decimal("-2"))
         assert cb.is_halted() is True
 
     def test_not_halted_with_small_loss(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         cb.record_trade(Decimal("-1"))  # 1% loss, under 2% limit
         assert cb.is_halted() is False
 
     def test_accumulates_losses(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         cb.record_trade(Decimal("-1"))
         cb.record_trade(Decimal("-1"))  # Now at -2 XRP = 2% of 100
         assert cb.is_halted() is True
 
     def test_gains_offset_losses(self):
-        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        cb = self._cb()
         cb.record_trade(Decimal("-1.5"))
         cb.record_trade(Decimal("1"))  # Net = -0.5 XRP
         assert cb.is_halted() is False
