@@ -1,4 +1,4 @@
-"""Multi-strategy arbitrage scanner: CLOB spreads, AMM pricing, cross-issuer.
+"""Two-leg arbitrage scanner: CLOB spreads, AMM pricing, cross-issuer.
 
 Scanning strategies (checked in order for each scan cycle):
 
@@ -9,12 +9,8 @@ Scanning strategies (checked in order for each scan cycle):
 
 2. Cross-issuer:  For currencies with multiple issuers (e.g., USD via
    Bitstamp vs GateHub), buy from the cheapest issuer and sell to the
-   most expensive.  Path: XRP -> IOU(cheap) -> IOU(expensive) -> XRP.
-
-3. Multi-hop discovery:  Uses ripple_path_find with source=destination to
-   discover circular arb paths through 3+ hops that manual construction
-   would miss.  The XRPL server's pathfinding explores the full order book
-   + AMM + trust line graph automatically.
+   most expensive.  Logical round-trip: XRP -> IOU(cheap) -> IOU(expensive)
+   -> XRP, executed as two sequential Payments (see docs/two_leg_architecture).
 
 Rate sources:
   - CLOB: book_offers (volume-weighted across multiple book levels)
@@ -29,9 +25,18 @@ Performance:
   changed in the latest ledger (triggered by book_changes stream), achieving
   ~4-7 second reaction time.
 
-The actual execution remains a single atomic Payment transaction using
-ALL available liquidity.  The simulation gate validates the real price
-before any trade.
+Why ripple_path_find multi-hop was removed (Phase B4):
+  XRPL rejects single Payment transactions where source and destination
+  are both XRP native with SendMax/Paths set (temBAD_SEND_XRP_MAX). A
+  circular 3+ hop path discovered by ripple_path_find can only be executed
+  as a chain of sequential Payments, which breaks the atomicity assumption
+  we needed. The scanner now emits only two-leg opportunities; the two-leg
+  executor enforces the required shape.
+
+The actual execution is two sequential Payments:
+  - Leg 1: spend XRP, receive IOU at buy_issuer (xrpDirect=false, legal)
+  - Leg 2: spend held IOU, receive XRP via sell_issuer (xrpDirect=false)
+Pre-simulation on both legs gates execution before any submit.
 """
 
 import asyncio
@@ -43,7 +48,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from xrpl.models.requests import BookOffers, AccountLines, AMMInfo, RipplePathFind
+from xrpl.models.requests import BookOffers, AccountLines, AMMInfo
 
 from src.config import PROFIT_THRESHOLD
 from src.connection import XRPLConnection
@@ -105,9 +110,9 @@ class Opportunity:
     sell_issuer: str = ""           # leg 2 routing issuer (rich side; == buy for same-issuer)
     iou_amount: Decimal = Decimal("0")  # IOU acquired in leg 1, spent in leg 2
 
-    # Legacy field retained for multi-hop paths that still use the old
-    # single-Payment model during the transition window. New code should
-    # prefer the two-leg fields above.
+    # `paths` is kept for two uses: Blacklist.is_blacklisted(opp.paths)
+    # inspects each step, and _deduplicate_opportunities uses the paths
+    # signature as the dedup key. Phase B5 migrates both to route_key().
     paths: list = field(default_factory=list)
     source_currency: str = "XRP"
 
@@ -416,86 +421,6 @@ class PathFinder:
         return good_rates
 
     # ------------------------------------------------------------------
-    # Multi-hop discovery via ripple_path_find
-    # ------------------------------------------------------------------
-
-    async def _discover_multi_hop(
-        self, position_xrp: Decimal, volatility_factor: Decimal,
-    ) -> list[Opportunity]:
-        """Use ripple_path_find to discover circular arb paths.
-
-        Sends XRP from our account back to ourselves, letting the XRPL
-        server's pathfinding algorithm explore the full order book + AMM +
-        trust line graph.  If source_amount < destination_amount, the path
-        is profitable.
-
-        This discovers multi-hop routes (3-6 intermediaries) that manual
-        1-hop and 2-hop path construction would miss.
-        """
-        destination_drops = str(int(position_xrp * DROPS_PER_XRP))
-
-        request = RipplePathFind(
-            source_account=self.wallet_address,
-            destination_account=self.wallet_address,
-            destination_amount=destination_drops,
-            source_currencies=[{"currency": "XRP"}],
-        )
-
-        result = await self.connection.send_request(request)
-        if not result or "alternatives" not in result:
-            return []
-
-        opportunities: list[Opportunity] = []
-
-        for alt in result["alternatives"]:
-            try:
-                source_amount = alt.get("source_amount")
-                # source_amount for XRP is a string of drops
-                if isinstance(source_amount, dict):
-                    continue  # Non-XRP source, skip
-                source_xrp = Decimal(str(source_amount)) / DROPS_PER_XRP
-                output_xrp = position_xrp
-
-                # Profitable only if we spend less than we receive
-                if source_xrp >= output_xrp:
-                    continue
-
-                profit_ratio = calculate_profit(source_xrp, output_xrp, volatility_factor)
-                if not is_profitable(source_xrp, output_xrp, volatility_factor):
-                    continue
-
-                profit_pct = profit_ratio * Decimal("100")
-
-                if profit_pct > _MAX_PROFIT_PCT:
-                    logger.debug(f"Rejected implausible multi-hop {profit_pct:.1f}%")
-                    continue
-
-                paths = alt.get("paths_computed", [])
-                if not paths:
-                    continue
-
-                logger.info(
-                    f"OPPORTUNITY [multi-hop]: {len(paths[0]) if paths else '?'} hops | "
-                    f"{profit_pct:.4f}% profit | "
-                    f"in={source_xrp:.6f} -> out={output_xrp:.6f} XRP"
-                )
-
-                opportunities.append(Opportunity(
-                    input_xrp=source_xrp,
-                    output_xrp=output_xrp,
-                    profit_pct=profit_pct,
-                    profit_ratio=profit_ratio,
-                    paths=paths,
-                    source_currency="XRP",
-                ))
-
-            except (InvalidOperation, ArithmeticError, TypeError, KeyError) as e:
-                logger.debug(f"Multi-hop parse error: {e}")
-                continue
-
-        return opportunities
-
-    # ------------------------------------------------------------------
     # Path construction
     # ------------------------------------------------------------------
 
@@ -778,7 +703,7 @@ class PathFinder:
         return _deduplicate_opportunities(all_opps)
 
     # ------------------------------------------------------------------
-    # Full scan (periodic fallback + multi-hop discovery)
+    # Full scan (periodic fallback)
     # ------------------------------------------------------------------
 
     async def scan(
@@ -787,15 +712,19 @@ class PathFinder:
         volatility_factor: Decimal = Decimal("0"),
         volatility_tracker=None,
     ) -> list[Opportunity]:
-        """Full multi-strategy scan: CLOB, AMM, cross-issuer, and multi-hop.
+        """Full scan: CLOB + AMM rate collection, same-issuer, cross-issuer.
 
-        Phase 1: Collect CLOB + AMM rates for all 27 IOUs (parallel RPC).
-        Phase 2: Same-issuer -- best buy vs best sell across venues.
-        Phase 3: Cross-issuer -- cheapest buy vs best sell across issuers.
-        Phase 4: Multi-hop -- ripple_path_find for circular arb discovery.
+        Phase 1: Collect CLOB + AMM rates for all trust-lined IOUs in parallel.
+        Phase 2: Same-issuer — best buy vs best sell across venues.
+        Phase 3: Cross-issuer — cheapest buy vs best sell across issuers.
 
         Position sizing is dynamic: scaled by opportunity quality and
         volatility via calculate_dynamic_position().
+
+        Multi-hop discovery via ripple_path_find was removed in Phase B4:
+        circular 3+ hop paths can only execute as chains of Payments and
+        the two-leg executor cannot run them. Only two-leg opportunities
+        are emitted.
 
         This is the periodic fallback scan (every SCAN_INTERVAL ledgers).
         For real-time response, scan_pairs() handles changed-pair scanning.
@@ -823,13 +752,6 @@ class PathFinder:
             all_rates, account_balance, vf,
             volatility_tracker=volatility_tracker,
         )
-
-        # Phase 4: Multi-hop discovery via ripple_path_find
-        # Probe at 5% of balance (middle of dynamic range)
-        mid_position = account_balance * Decimal("0.05")
-        if mid_position > Decimal("0"):
-            multi_hop_opps = await self._discover_multi_hop(mid_position, vf)
-            all_opps.extend(multi_hop_opps)
 
         logger.debug(
             f"Scan complete: {len(all_rates)} IOUs, {rated_count} with books, "
