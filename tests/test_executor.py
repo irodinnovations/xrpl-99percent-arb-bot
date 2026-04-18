@@ -1,21 +1,87 @@
-"""Tests for TradeExecutor — DRY_RUN branching and safety gates."""
+"""Tests for TradeExecutor — two-leg Payment flow and helpers.
+
+Covers:
+- Transaction builders (_build_leg1_tx, _build_leg2_tx)
+- IOU value formatting (_format_iou_value)
+- Sim delivered-amount extraction (_extract_delivered_iou)
+- Safety gates (circuit breaker, blacklist)
+- Legacy multi-hop opportunities are skipped (no two-leg metadata)
+- DRY_RUN paper trading with both-leg simulation
+- Leg 1 sim failure aborts with no state
+- Leg 2 sim failure aborts with no state
+- Recovery stub fires when leg 1 validated but leg 2 fails
+"""
 
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.executor import TradeExecutor
+
+from src.executor import (
+    TradeExecutor,
+    _build_leg1_tx,
+    _build_leg2_tx,
+    _format_iou_value,
+    _extract_delivered_iou,
+    _LEG1_SENDMAX_BUFFER,
+    DROPS_PER_XRP,
+)
 from src.pathfinder import Opportunity
 from src.simulator import SimResult
 
 
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+
+WALLET_ADDR = "rTestAddress1234567890abcdefgh"
+BUY_ISSUER = "rBuy8888888888888888888888888"
+SELL_ISSUER = "rSell7777777777777777777777777"
+
+
 @pytest.fixture
-def mock_opportunity():
+def same_issuer_opp():
+    """Same-issuer arbitrage opportunity (sell_issuer == buy_issuer)."""
     return Opportunity(
         input_xrp=Decimal("5"),
         output_xrp=Decimal("5.05"),
-        profit_pct=Decimal("0.7"),
-        profit_ratio=Decimal("0.007"),
+        profit_pct=Decimal("1.0"),
+        profit_ratio=Decimal("0.01"),
+        iou_currency="USD",
+        buy_issuer=BUY_ISSUER,
+        sell_issuer=BUY_ISSUER,
+        iou_amount=Decimal("2.5"),
         paths=[],
+        source_currency="XRP",
+    )
+
+
+@pytest.fixture
+def cross_issuer_opp():
+    """Cross-issuer arbitrage (different buy/sell issuers)."""
+    return Opportunity(
+        input_xrp=Decimal("10"),
+        output_xrp=Decimal("10.12"),
+        profit_pct=Decimal("1.2"),
+        profit_ratio=Decimal("0.012"),
+        iou_currency="USD",
+        buy_issuer=BUY_ISSUER,
+        sell_issuer=SELL_ISSUER,
+        iou_amount=Decimal("5.0"),
+        paths=[],
+        source_currency="XRP",
+    )
+
+
+@pytest.fixture
+def multihop_legacy_opp():
+    """Legacy multi-hop opp from ripple_path_find — no two-leg metadata."""
+    return Opportunity(
+        input_xrp=Decimal("5"),
+        output_xrp=Decimal("5.05"),
+        profit_pct=Decimal("1.0"),
+        profit_ratio=Decimal("0.01"),
+        paths=[[{"currency": "USD", "issuer": BUY_ISSUER}]],
         source_currency="XRP",
     )
 
@@ -38,18 +104,311 @@ def mock_blacklist():
 @pytest.fixture
 def mock_wallet():
     w = MagicMock()
-    w.address = "rTestAddress123"
+    w.address = WALLET_ADDR
+    w.public_key = "ED0000000000000000000000000000000000000000000000000000000000000000"
+    w.private_key = "ED0000000000000000000000000000000000000000000000000000000000000001"
     return w
+
+
+def _leg1_sim_success(delivered_value: str = "2.5") -> SimResult:
+    """Build a successful leg-1 SimResult with a delivered_amount in meta."""
+    return SimResult(
+        success=True,
+        result_code="tesSUCCESS",
+        raw={
+            "engine_result": "tesSUCCESS",
+            "meta": {
+                "TransactionResult": "tesSUCCESS",
+                "delivered_amount": {
+                    "currency": "USD",
+                    "issuer": BUY_ISSUER,
+                    "value": delivered_value,
+                },
+            },
+        },
+    )
+
+
+def _leg2_sim_success() -> SimResult:
+    return SimResult(
+        success=True,
+        result_code="tesSUCCESS",
+        raw={
+            "engine_result": "tesSUCCESS",
+            "meta": {"TransactionResult": "tesSUCCESS"},
+        },
+    )
+
+
+def _patch_autofill(executor: TradeExecutor, sequence: int = 100, ledger: int = 99999):
+    """Replace the executor's autofill with a predictable coroutine."""
+    executor._fetch_account_info = AsyncMock(return_value=(sequence, ledger))
+
+
+# ===========================================================================
+# Helper: _format_iou_value
+# ===========================================================================
+
+
+class TestFormatIouValue:
+    def test_integer_preserves_significant_zeros(self):
+        assert _format_iou_value(Decimal("100")) == "100"
+
+    def test_trailing_zeros_after_decimal_stripped(self):
+        assert _format_iou_value(Decimal("1.234000")) == "1.234"
+
+    def test_simple_decimal(self):
+        assert _format_iou_value(Decimal("0.5")) == "0.5"
+
+    def test_zero(self):
+        assert _format_iou_value(Decimal("0")) == "0"
+
+    def test_no_scientific_notation_for_small_values(self):
+        # Decimal("0.00000001") would normalize to "1E-8" — we must avoid that
+        formatted = _format_iou_value(Decimal("0.00000001"))
+        assert "E" not in formatted.upper()
+        assert Decimal(formatted) == Decimal("0.00000001")
+
+    def test_large_precise_value(self):
+        assert _format_iou_value(Decimal("1234567.89012345")) == "1234567.89012345"
+
+
+# ===========================================================================
+# Helper: _extract_delivered_iou
+# ===========================================================================
+
+
+class TestExtractDeliveredIou:
+    def test_iou_delivered_returns_decimal(self):
+        raw = {
+            "meta": {
+                "delivered_amount": {
+                    "currency": "USD",
+                    "issuer": BUY_ISSUER,
+                    "value": "2.345678",
+                }
+            }
+        }
+        assert _extract_delivered_iou(raw) == Decimal("2.345678")
+
+    def test_missing_meta_returns_none(self):
+        assert _extract_delivered_iou({}) is None
+
+    def test_missing_delivered_amount_returns_none(self):
+        assert _extract_delivered_iou({"meta": {}}) is None
+
+    def test_xrp_string_delivery_returns_none(self):
+        # Leg 1 should never deliver XRP; if it does, caller treats as bad.
+        raw = {"meta": {"delivered_amount": "5000000"}}
+        assert _extract_delivered_iou(raw) is None
+
+    def test_zero_value_returns_none(self):
+        raw = {"meta": {"delivered_amount": {"value": "0"}}}
+        assert _extract_delivered_iou(raw) is None
+
+    def test_malformed_value_returns_none(self):
+        raw = {"meta": {"delivered_amount": {"value": "not-a-number"}}}
+        assert _extract_delivered_iou(raw) is None
+
+    def test_none_input_returns_none(self):
+        assert _extract_delivered_iou(None) is None
+
+
+# ===========================================================================
+# Helper: _build_leg1_tx
+# ===========================================================================
+
+
+class TestBuildLeg1Tx:
+    def test_basic_shape(self, same_issuer_opp):
+        tx = _build_leg1_tx(WALLET_ADDR, same_issuer_opp)
+        assert tx["TransactionType"] == "Payment"
+        assert tx["Account"] == WALLET_ADDR
+        assert tx["Destination"] == WALLET_ADDR
+
+    def test_amount_is_iou_dict(self, same_issuer_opp):
+        tx = _build_leg1_tx(WALLET_ADDR, same_issuer_opp)
+        assert tx["Amount"] == {
+            "currency": "USD",
+            "issuer": BUY_ISSUER,
+            "value": "2.5",
+        }
+
+    def test_sendmax_has_one_percent_buffer(self, same_issuer_opp):
+        tx = _build_leg1_tx(WALLET_ADDR, same_issuer_opp)
+        # input_xrp = 5, buffer = 1% → 5.05 XRP → 5_050_000 drops
+        expected_drops = int(
+            Decimal("5") * DROPS_PER_XRP * (Decimal("1") + _LEG1_SENDMAX_BUFFER)
+        )
+        assert tx["SendMax"] == str(expected_drops)
+        assert tx["SendMax"] == "5050000"
+
+    def test_sendmax_is_string_not_dict(self, same_issuer_opp):
+        tx = _build_leg1_tx(WALLET_ADDR, same_issuer_opp)
+        # SendMax must be XRP drops (string), never an IOU dict on leg 1
+        assert isinstance(tx["SendMax"], str)
+
+    def test_no_paths_field(self, same_issuer_opp):
+        tx = _build_leg1_tx(WALLET_ADDR, same_issuer_opp)
+        assert "Paths" not in tx
+
+    def test_no_flags_field(self, same_issuer_opp):
+        # tfPartialPayment is forbidden on either leg per protocol+design
+        tx = _build_leg1_tx(WALLET_ADDR, same_issuer_opp)
+        assert "Flags" not in tx
+
+    def test_cross_issuer_leg1_uses_buy_issuer(self, cross_issuer_opp):
+        tx = _build_leg1_tx(WALLET_ADDR, cross_issuer_opp)
+        # Leg 1 always targets the cheap (buy) side, regardless of cross-issuer
+        assert tx["Amount"]["issuer"] == BUY_ISSUER
+
+    def test_missing_iou_currency_raises(self):
+        opp = Opportunity(
+            input_xrp=Decimal("5"),
+            output_xrp=Decimal("5.05"),
+            profit_pct=Decimal("1.0"),
+            profit_ratio=Decimal("0.01"),
+            iou_currency="",
+            buy_issuer=BUY_ISSUER,
+            iou_amount=Decimal("2.5"),
+        )
+        with pytest.raises(ValueError, match="iou_currency"):
+            _build_leg1_tx(WALLET_ADDR, opp)
+
+    def test_zero_iou_amount_raises(self):
+        opp = Opportunity(
+            input_xrp=Decimal("5"),
+            output_xrp=Decimal("5.05"),
+            profit_pct=Decimal("1.0"),
+            profit_ratio=Decimal("0.01"),
+            iou_currency="USD",
+            buy_issuer=BUY_ISSUER,
+            iou_amount=Decimal("0"),
+        )
+        with pytest.raises(ValueError, match="iou_amount"):
+            _build_leg1_tx(WALLET_ADDR, opp)
+
+
+# ===========================================================================
+# Helper: _build_leg2_tx
+# ===========================================================================
+
+
+class TestBuildLeg2Tx:
+    def test_basic_shape(self, same_issuer_opp):
+        tx = _build_leg2_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        assert tx["TransactionType"] == "Payment"
+        assert tx["Account"] == WALLET_ADDR
+        assert tx["Destination"] == WALLET_ADDR
+
+    def test_amount_is_xrp_drops_string(self, same_issuer_opp):
+        tx = _build_leg2_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        # output_xrp = 5.05 → 5_050_000 drops
+        assert tx["Amount"] == "5050000"
+        assert isinstance(tx["Amount"], str)
+
+    def test_sendmax_uses_delivered_amount_not_theoretical(
+        self, same_issuer_opp
+    ):
+        # Leg 1 actually delivered 2.4987 (less than theoretical 2.5)
+        delivered = Decimal("2.4987")
+        tx = _build_leg2_tx(WALLET_ADDR, same_issuer_opp, delivered)
+        assert tx["SendMax"]["value"] == "2.4987"
+        assert tx["SendMax"]["value"] != "2.5"
+
+    def test_sendmax_sources_from_buy_issuer(self, cross_issuer_opp):
+        # SendMax is the IOU we hold, which came from buy_issuer
+        tx = _build_leg2_tx(WALLET_ADDR, cross_issuer_opp, Decimal("5.0"))
+        assert tx["SendMax"]["issuer"] == BUY_ISSUER
+
+    def test_same_issuer_has_no_paths(self, same_issuer_opp):
+        tx = _build_leg2_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        assert "Paths" not in tx
+
+    def test_cross_issuer_routes_through_sell_issuer(self, cross_issuer_opp):
+        tx = _build_leg2_tx(WALLET_ADDR, cross_issuer_opp, Decimal("5.0"))
+        assert "Paths" in tx
+        # Exactly one path through the rich (sell) issuer's book
+        assert len(tx["Paths"]) == 1
+        assert len(tx["Paths"][0]) == 1
+        step = tx["Paths"][0][0]
+        assert step["currency"] == "USD"
+        assert step["issuer"] == SELL_ISSUER
+
+    def test_no_flags_field(self, cross_issuer_opp):
+        tx = _build_leg2_tx(WALLET_ADDR, cross_issuer_opp, Decimal("5.0"))
+        assert "Flags" not in tx
+
+    def test_zero_iou_amount_raises(self, same_issuer_opp):
+        with pytest.raises(ValueError, match="iou_amount_to_sell"):
+            _build_leg2_tx(WALLET_ADDR, same_issuer_opp, Decimal("0"))
+
+
+# ===========================================================================
+# TradeExecutor: safety gates
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_halted_skips(
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    mock_circuit_breaker.is_halted.return_value = True
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+    )
+    result = await executor.execute(same_issuer_opp)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_blacklisted_route_skips(
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    mock_blacklist.is_blacklisted.return_value = True
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+    )
+    result = await executor.execute(same_issuer_opp)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_multihop_opp_is_skipped(
+    multihop_legacy_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    """Multi-hop opps without two-leg metadata must be skipped, not crash."""
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+    )
+    # _fetch_account_info should never be reached — stub raises if called
+    executor._fetch_account_info = AsyncMock(
+        side_effect=AssertionError("should not be called for legacy opp")
+    )
+    result = await executor.execute(multihop_legacy_opp)
+    assert result is False
+
+
+# ===========================================================================
+# TradeExecutor: DRY_RUN path
+# ===========================================================================
 
 
 @pytest.mark.asyncio
 @patch("src.executor.log_trade", new_callable=AsyncMock)
 @patch("src.executor.send_alert", new_callable=AsyncMock)
 @patch("src.executor.simulate_transaction", new_callable=AsyncMock)
-async def test_dry_run_logs_without_submit(
-    mock_sim, mock_alert, mock_log, mock_opportunity, mock_circuit_breaker, mock_blacklist, mock_wallet
+async def test_dry_run_simulates_both_legs_and_logs(
+    mock_sim, mock_alert, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
 ):
-    mock_sim.return_value = SimResult(success=True, result_code="tesSUCCESS")
+    mock_sim.side_effect = [_leg1_sim_success("2.5"), _leg2_sim_success()]
 
     executor = TradeExecutor(
         wallet=mock_wallet,
@@ -57,19 +416,88 @@ async def test_dry_run_logs_without_submit(
         blacklist=mock_blacklist,
         dry_run=True,
     )
-    result = await executor.execute(mock_opportunity)
+    _patch_autofill(executor)
+
+    result = await executor.execute(same_issuer_opp)
 
     assert result is True
+    assert mock_sim.call_count == 2, "Both legs must be pre-simulated"
     mock_log.assert_called_once()
-    log_data = mock_log.call_args[0][0]
-    assert log_data["dry_run"] is True
+    trade_data = mock_log.call_args[0][0]
+    assert trade_data["dry_run"] is True
+    assert trade_data["leg1_sim_result"] == "tesSUCCESS"
+    assert trade_data["leg2_sim_result"] == "tesSUCCESS"
+    assert trade_data["iou_amount_delivered"] == "2.5"
+    assert trade_data["route_key"] == same_issuer_opp.route_key()
     mock_alert.assert_called_once()
 
 
 @pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
 @patch("src.executor.simulate_transaction", new_callable=AsyncMock)
-async def test_simulation_failure_skips(
-    mock_sim, mock_opportunity, mock_circuit_breaker, mock_blacklist, mock_wallet
+async def test_dry_run_leg2_built_with_delivered_amount(
+    mock_sim, mock_alert, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
+):
+    """The leg-2 tx passed to simulate MUST use leg-1's delivered value,
+    not the theoretical opportunity.iou_amount."""
+    # Leg 1 reports that only 2.4987 delivered (slightly less than theoretical 2.5)
+    mock_sim.side_effect = [_leg1_sim_success("2.4987"), _leg2_sim_success()]
+
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=True,
+    )
+    _patch_autofill(executor)
+
+    await executor.execute(same_issuer_opp)
+
+    # Second call was leg 2 — inspect its tx_dict
+    leg2_call_tx = mock_sim.call_args_list[1][0][0]
+    assert leg2_call_tx["SendMax"]["value"] == "2.4987"
+    # Sequence for leg 2 must be N+1
+    assert leg2_call_tx["Sequence"] == 101  # _patch_autofill uses 100
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+@patch("src.executor.simulate_transaction", new_callable=AsyncMock)
+async def test_dry_run_cross_issuer_leg2_has_paths(
+    mock_sim, mock_alert, mock_log,
+    cross_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
+):
+    mock_sim.side_effect = [_leg1_sim_success("5.0"), _leg2_sim_success()]
+
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=True,
+    )
+    _patch_autofill(executor)
+
+    await executor.execute(cross_issuer_opp)
+
+    leg2_call_tx = mock_sim.call_args_list[1][0][0]
+    assert "Paths" in leg2_call_tx
+    assert leg2_call_tx["Paths"][0][0]["issuer"] == SELL_ISSUER
+
+
+# ===========================================================================
+# TradeExecutor: simulation gates
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.simulate_transaction", new_callable=AsyncMock)
+async def test_leg1_sim_failure_aborts_before_leg2(
+    mock_sim, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
 ):
     mock_sim.return_value = SimResult(success=False, result_code="tecPATH_DRY")
 
@@ -79,22 +507,120 @@ async def test_simulation_failure_skips(
         blacklist=mock_blacklist,
         dry_run=True,
     )
-    result = await executor.execute(mock_opportunity)
+    _patch_autofill(executor)
+
+    result = await executor.execute(same_issuer_opp)
 
     assert result is False
+    # Only leg 1 simulated; leg 2 never attempted
+    assert mock_sim.call_count == 1
+    mock_log.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_halted_skips(
-    mock_opportunity, mock_circuit_breaker, mock_blacklist, mock_wallet
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.simulate_transaction", new_callable=AsyncMock)
+async def test_leg2_sim_failure_aborts_with_no_state(
+    mock_sim, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
 ):
-    mock_circuit_breaker.is_halted.return_value = True
+    # Leg 1 passes, leg 2 fails
+    mock_sim.side_effect = [
+        _leg1_sim_success("2.5"),
+        SimResult(success=False, result_code="tecPATH_PARTIAL"),
+    ]
 
     executor = TradeExecutor(
         wallet=mock_wallet,
         circuit_breaker=mock_circuit_breaker,
         blacklist=mock_blacklist,
+        dry_run=True,
     )
-    result = await executor.execute(mock_opportunity)
+    _patch_autofill(executor)
+
+    result = await executor.execute(same_issuer_opp)
 
     assert result is False
+    assert mock_sim.call_count == 2
+    mock_log.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.simulate_transaction", new_callable=AsyncMock)
+async def test_leg1_sim_missing_delivered_amount_skips(
+    mock_sim, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
+):
+    """A leg-1 sim that succeeds but omits delivered_amount can't
+    parameterize leg 2 safely — must skip."""
+    # tesSUCCESS but no meta.delivered_amount
+    weird_leg1 = SimResult(
+        success=True,
+        result_code="tesSUCCESS",
+        raw={"engine_result": "tesSUCCESS", "meta": {"TransactionResult": "tesSUCCESS"}},
+    )
+    mock_sim.return_value = weird_leg1
+
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=True,
+    )
+    _patch_autofill(executor)
+
+    result = await executor.execute(same_issuer_opp)
+    assert result is False
+    # Only leg 1 simulated (we bailed before leg 2)
+    assert mock_sim.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_autofill_failure_skips_opportunity(
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=True,
+    )
+    executor._fetch_account_info = AsyncMock(return_value=None)
+    result = await executor.execute(same_issuer_opp)
+    assert result is False
+
+
+# ===========================================================================
+# TradeExecutor: recovery stub
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+async def test_recover_stub_logs_and_returns_false(
+    mock_alert, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
+):
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=False,
+    )
+    leg1_result = {"tx_hash": "ABC123", "engine_result": "tesSUCCESS", "validated": True}
+    leg2_tx = {"TransactionType": "Payment"}
+    trade_data = {"profit_pct": "1.0"}
+
+    result = await executor._recover(
+        same_issuer_opp, leg1_result, leg2_tx, trade_data,
+        reason="leg2_failed: tecPATH_DRY",
+    )
+
+    assert result is False
+    mock_log.assert_called_once()
+    logged = mock_log.call_args[0][0]
+    assert logged["recovery_stub"] is True
+    assert logged["recovery_reason"] == "leg2_failed: tecPATH_DRY"
+    mock_alert.assert_called_once()
