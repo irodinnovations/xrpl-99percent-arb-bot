@@ -64,6 +64,16 @@ class TestCircuitBreaker:
         cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
         assert isinstance(cb.reference_balance, Decimal)
 
+    def test_halt_for_sets_halt_until(self):
+        """halt_for triggers a manual time-boxed halt regardless of P&L."""
+        cb = CircuitBreaker(account_address="rTest", reference_balance=Decimal("100"))
+        assert cb.is_halted() is False
+        cb.halt_for(hours=2, reason="mid_trade_recovery_failed")
+        assert cb.is_halted() is True
+        # Manual halt also auto-expires like daily-loss halt
+        cb._halt_until = datetime.now(timezone.utc) - timedelta(minutes=1)
+        assert cb.is_halted() is False
+
 
 class TestBlacklist:
     def test_empty_blacklist_allows_all(self):

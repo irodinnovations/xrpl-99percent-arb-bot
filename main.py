@@ -51,6 +51,55 @@ from src.volatility import VolatilityTracker
 logger = logging.getLogger(__name__)
 
 
+async def _startup_drain_held_iou(wallet_address, executor) -> None:
+    """Scan trust lines on boot. Drain any non-zero IOU balance.
+
+    Covers the case where a prior run crashed mid-trade, leaving the
+    wallet holding an IOU from a committed leg 1. Runs before the
+    websocket connect() loop so the bot is always in a clean state
+    by the time the first ledger_close callback fires.
+
+    Uses the executor's HTTP RPC client directly so it works even when
+    no websocket is yet open. Informational — failure to drain is
+    logged but does not prevent normal startup.
+    """
+    try:
+        payload = {
+            "method": "account_lines",
+            "params": [{"account": wallet_address}],
+        }
+        resp = await asyncio.to_thread(executor.rpc_client.request, payload)
+        lines = (resp.get("result", {}) or {}).get("lines", [])
+    except Exception as e:
+        logger.warning(f"Startup drain: could not fetch trust lines ({e}); skipping")
+        return
+
+    held = []
+    for line in lines:
+        try:
+            balance = Decimal(str(line.get("balance", "0")))
+        except Exception:
+            continue
+        if balance > Decimal("0"):
+            held.append((line["currency"], line["account"], balance))
+
+    if not held:
+        logger.info("Startup drain: wallet clean (no non-zero IOU balances)")
+        return
+
+    logger.critical(
+        f"Startup drain: {len(held)} non-zero IOU balance(s) — draining before scan"
+    )
+    for currency, issuer, balance in held:
+        ok = await executor.drain_iou(currency, issuer, balance)
+        if not ok:
+            logger.error(
+                f"Startup drain FAILED for {currency}/{issuer[:8]}... "
+                f"— balance {balance} remains. Bot will still start; "
+                f"manual intervention optional but not required."
+            )
+
+
 async def _execute_opportunities(
     opportunities: list,
     executor: TradeExecutor,
@@ -242,6 +291,10 @@ async def main():
     # Register stream callbacks before connecting
     connection.on_ledger_close(on_ledger_close)
     connection.on_book_changes(on_book_changes)
+
+    # Startup recovery guard — drain any held IOU before opening the
+    # scan loop. Runs over HTTP so it does not depend on the websocket.
+    await _startup_drain_held_iou(wallet.address, executor)
 
     # Send startup alert (gracefully skipped if Telegram not configured)
     await send_alert(

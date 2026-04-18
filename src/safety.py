@@ -125,6 +125,19 @@ class CircuitBreaker:
                 self.reference_balance = balance
                 logger.info(f"Reference balance updated: {balance} XRP")
 
+    def halt_for(self, hours: int, reason: str = "") -> None:
+        """Trigger a manual time-boxed halt independent of daily P&L.
+
+        Used by the recovery flow when mid-trade dumps fail repeatedly
+        and we need to pause all trading for MID_TRADE_HALT_HOURS. The
+        halt auto-expires like any other — no human action required.
+        """
+        self._halt_until = _utcnow() + timedelta(hours=hours)
+        logger.critical(
+            f"CIRCUIT BREAKER MANUAL HALT for {hours}h until "
+            f"{self._halt_until.isoformat()} — reason: {reason or 'unspecified'}"
+        )
+
 
 class Blacklist:
     """Route and currency blacklist with time-expiring entries.

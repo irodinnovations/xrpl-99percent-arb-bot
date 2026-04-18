@@ -52,6 +52,9 @@ from src.config import (
     DRY_RUN,
     MAX_TRADE_XRP_ABS,
     MIN_BALANCE_GUARD_PCT,
+    LEG2_RETRY_MAX,
+    RECOVERY_MAX_LOSS_PCT,
+    MID_TRADE_HALT_HOURS,
 )
 from src.pathfinder import Opportunity
 from src.simulator import (
@@ -90,6 +93,22 @@ _TX_POLL_INTERVAL = 1.5
 
 # Standard XRPL reference fee (12 drops).
 _STANDARD_FEE_DROPS = "12"
+
+# tfPartialPayment flag. NEVER set on leg 1 or leg 2 of a normal arb
+# (xrpDirect forbids it). Only used on startup IOU drain where we just
+# want to accept whatever XRP the market gives for our held balance.
+_TF_PARTIAL_PAYMENT = 131072
+
+# Max attempts in the recovery flow for the emergency IOU market-dump.
+# After this many fails, the bot halts for MID_TRADE_HALT_HOURS and
+# blacklists the route. Held IOU cleans up via the startup drain guard.
+_RECOVERY_DUMP_ATTEMPTS = 2
+
+# Startup drain XRP ceiling (in drops). With tfPartialPayment, Amount
+# is an upper bound; we set it unreasonably high (1B drops = 1000 XRP)
+# so the market delivers whatever it can for our SendMax IOU without
+# the ceiling ever binding.
+_DRAIN_XRP_CEILING_DROPS = "1000000000"
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +242,92 @@ def _extract_delivered_iou(sim_raw: Optional[dict]) -> Optional[Decimal]:
         return None
     meta = sim_raw.get("meta") or {}
     return extract_delivered_iou(meta.get("delivered_amount"))
+
+
+def _build_market_dump_tx(
+    wallet_address: str,
+    opportunity: Opportunity,
+    iou_held: Decimal,
+    max_loss_pct: Decimal = RECOVERY_MAX_LOSS_PCT,
+) -> dict:
+    """Emergency IOU->XRP dump used when leg 2 retries are exhausted.
+
+    Atomic floor shape (no tfPartialPayment):
+      - Amount:  XRP drops — minimum acceptable return, derived from the
+        original leg-1 input_xrp and a hard max_loss_pct. If the market
+        can't deliver at least this, the tx fails cleanly and we halt.
+      - SendMax: IOU dict for every unit of held IOU — the cap on what
+        we're willing to spend. rippled will usually spend less if rates
+        are favorable.
+      - Paths:   cross-issuer routes through sell_issuer. Same-issuer
+        omits Paths and relies on default pathfinding.
+
+    Not to be confused with _build_startup_drain_tx, which has no floor
+    because the original entry price isn't known at startup.
+    """
+    if iou_held <= Decimal("0"):
+        raise ValueError("Market-dump requires a positive iou_held")
+
+    min_xrp_drops = int(
+        opportunity.input_xrp * (Decimal("1") - max_loss_pct) * DROPS_PER_XRP
+    )
+    if min_xrp_drops <= 0:
+        raise ValueError("Market-dump floor must be positive drops")
+
+    sell_issuer = opportunity.sell_issuer or opportunity.buy_issuer
+    tx: dict = {
+        "TransactionType": "Payment",
+        "Account": wallet_address,
+        "Destination": wallet_address,
+        "Amount": str(min_xrp_drops),
+        "SendMax": {
+            "currency": opportunity.iou_currency,
+            "issuer": opportunity.buy_issuer,
+            "value": _format_iou_value(iou_held),
+        },
+    }
+    if sell_issuer != opportunity.buy_issuer:
+        tx["Paths"] = [[{
+            "currency": opportunity.iou_currency,
+            "issuer": sell_issuer,
+            "type": 48,
+            "type_hex": "0000000000000030",
+        }]]
+    return tx
+
+
+def _build_startup_drain_tx(
+    wallet_address: str,
+    currency: str,
+    issuer: str,
+    iou_balance: Decimal,
+) -> dict:
+    """Startup IOU drain with tfPartialPayment — accept any positive XRP.
+
+    Used by the bot-startup recovery guard when a held IOU is found on
+    boot with no known entry-price context. tfPartialPayment is LEGAL
+    here because source is IOU (xrpDirect=false); Amount becomes a
+    ceiling and the market delivers whatever it can.
+
+    Because no original opportunity exists, there is no safety floor —
+    this is a 'clean wallet' operation, not a profit operation. The
+    caller must only invoke this on genuine leftovers.
+    """
+    if iou_balance <= Decimal("0"):
+        raise ValueError("Startup drain requires a positive iou_balance")
+
+    return {
+        "TransactionType": "Payment",
+        "Account": wallet_address,
+        "Destination": wallet_address,
+        "Amount": _DRAIN_XRP_CEILING_DROPS,
+        "SendMax": {
+            "currency": currency,
+            "issuer": issuer,
+            "value": _format_iou_value(iou_balance),
+        },
+        "Flags": _TF_PARTIAL_PAYMENT,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +624,7 @@ class TradeExecutor:
         return True
 
     # ------------------------------------------------------------------
-    # Recovery (STUB — phase C implements retry / market-dump / halt)
+    # Recovery flow (Phase C): retry -> market-dump -> halt+blacklist
     # ------------------------------------------------------------------
 
     async def _recover(
@@ -530,27 +635,223 @@ class TradeExecutor:
         trade_data: dict,
         reason: str,
     ) -> bool:
-        """STUB: mid-trade recovery — phase C will replace this.
+        """Mid-trade recovery — never requires human intervention.
 
-        In phase B2 we log the MID_TRADE state and return False so the
-        scan loop can continue. The VPS bot-startup recovery guard (phase
-        B5) will drain any held IOU on the next restart; in the interim
-        the held IOU simply sits on the trust line.
+        Entered after leg 1 validated but leg 2 did not. Three escalating
+        steps, each time-boxed and auto-resolving:
+
+        1. Retry leg 2 up to LEG2_RETRY_MAX times with fresh sequence and
+           LastLedgerSequence. Any success records the original P&L and
+           exits cleanly.
+        2. Market-dump the held IOU back to XRP, accepting up to
+           RECOVERY_MAX_LOSS_PCT of the entry cost as loss. Atomic floor
+           on Amount ensures the loss is bounded; if the floor can't be
+           met, the tx fails and we escalate.
+        3. After `_RECOVERY_DUMP_ATTEMPTS` failed dumps, halt the circuit
+           breaker for MID_TRADE_HALT_HOURS and blacklist the route for
+           its TTL. The held IOU remains on the trust line until the
+           startup recovery guard runs on next boot.
+
+        Always returns False — even if retry/dump succeeds, the original
+        opportunity did not complete cleanly, so the scan loop should not
+        treat this as a normal trade success.
         """
         leg1_hash = leg1_result.get("tx_hash", "unknown")
-        logger.critical(
-            f"MID_TRADE state: leg 1 committed ({leg1_hash}) but leg 2 did not. "
-            f"Reason: {reason}. Phase B2 stub: held IOU remains on trust line. "
-            f"Phase C will retry, market-dump, or halt+blacklist."
-        )
-        trade_data["recovery_stub"] = True
+        iou_held = Decimal(trade_data.get("iou_amount_delivered", "0"))
         trade_data["recovery_reason"] = reason
-        trade_data["error"] = f"mid_trade_stub: {reason}"
+        logger.critical(
+            f"MID_TRADE: leg 1 {leg1_hash[:16]}... committed, holding "
+            f"{iou_held} {opportunity.iou_currency}. Reason: {reason}. "
+            f"Entering recovery."
+        )
+        await send_alert(
+            f"MID_TRADE (informational): recovering leg 1 {leg1_hash[:16]}... | "
+            f"holding {iou_held} {opportunity.iou_currency} | reason: {reason}"
+        )
+
+        # ---- Step 1: retry leg 2 ----------------------------------------
+        for attempt in range(1, LEG2_RETRY_MAX + 1):
+            result = await self._retry_leg2(leg2_tx, attempt)
+            trade_data[f"retry{attempt}_hash"] = result.get("tx_hash")
+            trade_data[f"retry{attempt}_result"] = result.get("engine_result")
+            if result.get("success"):
+                profit_xrp = opportunity.output_xrp - opportunity.input_xrp
+                self.circuit_breaker.record_trade(profit_xrp)
+                trade_data["recovery_outcome"] = f"leg2_retry_{attempt}"
+                trade_data["leg2_hash"] = result.get("tx_hash")
+                trade_data["leg2_engine_result"] = result.get("engine_result")
+                trade_data["leg2_validated"] = True
+                logger.info(
+                    f"Recovery retry {attempt} succeeded — "
+                    f"trade completes at {opportunity.profit_pct:.4f}%"
+                )
+                await log_trade(trade_data)
+                await send_alert(
+                    f"RECOVERED on retry {attempt}: "
+                    f"{opportunity.profit_pct:.4f}% profit secured"
+                )
+                return False  # state clean, but original execute() path didn't succeed
+
+        # ---- Step 2: market-dump ---------------------------------------
+        if iou_held > Decimal("0"):
+            dump_outcome = await self._market_dump(
+                opportunity, iou_held, trade_data,
+            )
+            if dump_outcome:
+                return False  # dump succeeded, state clean, loss bounded
+
+        # ---- Step 3: halt + blacklist ----------------------------------
+        self.circuit_breaker.halt_for(
+            hours=MID_TRADE_HALT_HOURS,
+            reason=f"mid_trade_recovery_exhausted: {reason}",
+        )
+        self.blacklist.block_route(opportunity.route_key())
+        trade_data["recovery_outcome"] = "halt_and_blacklist"
+        trade_data["error"] = (
+            f"recovery_exhausted: {reason}; held {iou_held} "
+            f"{opportunity.iou_currency} awaiting startup drain"
+        )
+        logger.critical(
+            f"Recovery exhausted. Halted for {MID_TRADE_HALT_HOURS}h, route "
+            f"{opportunity.route_key()} blacklisted. Held {iou_held} "
+            f"{opportunity.iou_currency} — startup drain will clean up."
+        )
         await log_trade(trade_data)
         await send_alert(
-            f"MID_TRADE (informational): leg 1 {leg1_hash[:16]}... committed, "
-            f"leg 2 failed ({reason}). IOU held on trust line. "
-            f"Phase C recovery not yet implemented."
+            f"CRITICAL (informational): recovery exhausted after "
+            f"{LEG2_RETRY_MAX} retries + {_RECOVERY_DUMP_ATTEMPTS} dumps. "
+            f"Halted {MID_TRADE_HALT_HOURS}h, route blacklisted. "
+            f"Held IOU drains on next boot."
+        )
+        return False
+
+    async def _retry_leg2(self, leg2_tx: dict, attempt: int) -> dict:
+        """Re-submit leg 2 with fresh sequence + LLS and a clean signature."""
+        logger.info(f"Leg 2 retry attempt {attempt}/{LEG2_RETRY_MAX}")
+        acct = await self._fetch_account_info()
+        if acct is None:
+            return {
+                "success": False, "tx_hash": "unknown",
+                "engine_result": "autofill_failed", "validated": False,
+            }
+        fresh_seq, fresh_ledger = acct
+
+        # Shallow-copy and reset everything that needs to be re-derived
+        retry = dict(leg2_tx)
+        retry["Sequence"] = fresh_seq
+        retry["Fee"] = _STANDARD_FEE_DROPS
+        retry["LastLedgerSequence"] = fresh_ledger + _LEDGER_WINDOW
+        retry.pop("TxnSignature", None)
+        retry.pop("SigningPubKey", None)
+
+        return await self._submit_and_wait(retry, leg_label=f"leg2-retry-{attempt}")
+
+    async def _market_dump(
+        self,
+        opportunity: Opportunity,
+        iou_held: Decimal,
+        trade_data: dict,
+    ) -> bool:
+        """Attempt up to _RECOVERY_DUMP_ATTEMPTS market-dumps. True iff one
+        succeeded and the wallet is clean of the held IOU."""
+        try:
+            dump_template = _build_market_dump_tx(
+                self.wallet.address, opportunity, iou_held,
+            )
+        except ValueError as e:
+            logger.error(f"Could not build dump tx: {e}")
+            return False
+
+        loss_cap_xrp = opportunity.input_xrp * RECOVERY_MAX_LOSS_PCT
+
+        for attempt in range(1, _RECOVERY_DUMP_ATTEMPTS + 1):
+            logger.warning(
+                f"Market-dump attempt {attempt}/{_RECOVERY_DUMP_ATTEMPTS} — "
+                f"accepting up to {loss_cap_xrp:.6f} XRP loss"
+            )
+            acct = await self._fetch_account_info()
+            if acct is None:
+                trade_data[f"dump{attempt}_result"] = "autofill_failed"
+                continue
+            fresh_seq, fresh_ledger = acct
+
+            tx = dict(dump_template)
+            tx["Sequence"] = fresh_seq
+            tx["Fee"] = _STANDARD_FEE_DROPS
+            tx["LastLedgerSequence"] = fresh_ledger + _LEDGER_WINDOW
+
+            result = await self._submit_and_wait(tx, leg_label=f"dump-{attempt}")
+            trade_data[f"dump{attempt}_hash"] = result.get("tx_hash")
+            trade_data[f"dump{attempt}_result"] = result.get("engine_result")
+
+            if result.get("success"):
+                self.circuit_breaker.record_trade(-loss_cap_xrp)
+                trade_data["recovery_outcome"] = f"dump_succeeded_attempt_{attempt}"
+                logger.warning(
+                    f"Market-dump succeeded on attempt {attempt}. "
+                    f"Recorded {loss_cap_xrp} XRP worst-case loss."
+                )
+                await log_trade(trade_data)
+                await send_alert(
+                    f"Dump succeeded — loss capped at "
+                    f"{RECOVERY_MAX_LOSS_PCT * 100:.2f}% of entry"
+                )
+                return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Startup recovery guard — drain any held IOU on boot
+    # ------------------------------------------------------------------
+
+    async def drain_iou(
+        self,
+        currency: str,
+        issuer: str,
+        balance: Decimal,
+    ) -> bool:
+        """Dump a single IOU back to XRP via tfPartialPayment.
+
+        Called by the main-loop startup guard when trust-line balances
+        are non-zero on boot. No profit guarantee, no floor — we just
+        want the wallet clean so normal scanning can resume.
+
+        Returns True iff the dump validated with tesSUCCESS.
+        """
+        try:
+            dump_tx = _build_startup_drain_tx(
+                self.wallet.address, currency, issuer, balance,
+            )
+        except ValueError as e:
+            logger.error(f"drain_iou: build failed for {currency}/{issuer[:8]}...: {e}")
+            return False
+
+        acct = await self._fetch_account_info()
+        if acct is None:
+            logger.error("drain_iou: account_info fetch failed")
+            return False
+        seq, current_ledger = acct
+
+        dump_tx["Sequence"] = seq
+        dump_tx["Fee"] = _STANDARD_FEE_DROPS
+        dump_tx["LastLedgerSequence"] = current_ledger + _LEDGER_WINDOW
+
+        logger.warning(
+            f"Startup drain: dumping {balance} {currency} from issuer "
+            f"{issuer[:8]}... (tfPartialPayment=true, no floor)"
+        )
+        result = await self._submit_and_wait(dump_tx, leg_label="startup-drain")
+
+        if result.get("success"):
+            logger.info(
+                f"Startup drain OK for {currency}/{issuer[:8]}...: "
+                f"hash={result.get('tx_hash')}"
+            )
+            return True
+
+        logger.error(
+            f"Startup drain FAILED for {currency}/{issuer[:8]}...: "
+            f"{result.get('engine_result')}"
         )
         return False
 

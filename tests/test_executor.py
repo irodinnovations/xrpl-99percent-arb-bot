@@ -733,31 +733,236 @@ async def test_autofill_failure_skips_opportunity(
 # ===========================================================================
 
 
-@pytest.mark.asyncio
-@patch("src.executor.log_trade", new_callable=AsyncMock)
-@patch("src.executor.send_alert", new_callable=AsyncMock)
-async def test_recover_stub_logs_and_returns_false(
-    mock_alert, mock_log,
-    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
-):
-    executor = TradeExecutor(
+# ===========================================================================
+# Recovery flow (Phase C)
+# ===========================================================================
+
+
+def _ok_leg2_submit() -> dict:
+    return {
+        "success": True, "tx_hash": "RETRY_OK_HASH",
+        "engine_result": "tesSUCCESS", "validated": True,
+    }
+
+
+def _fail_leg2_submit(code: str = "tecPATH_DRY") -> dict:
+    return {
+        "success": False, "tx_hash": "FAIL_HASH",
+        "engine_result": code, "validated": True,
+    }
+
+
+@pytest.fixture
+def recovery_executor(mock_circuit_breaker, mock_blacklist, mock_wallet):
+    ex = TradeExecutor(
         wallet=mock_wallet,
         circuit_breaker=mock_circuit_breaker,
         blacklist=mock_blacklist,
         dry_run=False,
     )
-    leg1_result = {"tx_hash": "ABC123", "engine_result": "tesSUCCESS", "validated": True}
-    leg2_tx = {"TransactionType": "Payment"}
-    trade_data = {"profit_pct": "1.0"}
+    _patch_autofill(ex)
+    return ex
 
-    result = await executor._recover(
-        same_issuer_opp, leg1_result, leg2_tx, trade_data,
-        reason="leg2_failed: tecPATH_DRY",
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+async def test_recover_retry_first_attempt_succeeds(
+    mock_alert, mock_log,
+    same_issuer_opp, recovery_executor,
+):
+    """First leg-2 retry succeeds → record P&L, return False (execute path
+    already aborted but state is clean and trade completed at spec profit)."""
+    recovery_executor._submit_and_wait = AsyncMock(return_value=_ok_leg2_submit())
+
+    trade_data = {"iou_amount_delivered": "2.5", "profit_pct": "1.0"}
+    leg1_result = {"tx_hash": "LEG1", "engine_result": "tesSUCCESS", "validated": True}
+
+    result = await recovery_executor._recover(
+        same_issuer_opp, leg1_result, {"TransactionType": "Payment"},
+        trade_data, reason="leg2_failed: tecPATH_DRY",
+    )
+    assert result is False  # always False from _recover
+    logged = mock_log.call_args[0][0]
+    assert logged["recovery_outcome"] == "leg2_retry_1"
+    # Profit recorded on circuit breaker
+    recovery_executor.circuit_breaker.record_trade.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+async def test_recover_retry_exhausted_falls_to_dump(
+    mock_alert, mock_log,
+    same_issuer_opp, recovery_executor,
+):
+    """All LEG2_RETRY_MAX retries fail → market-dump succeeds on first try."""
+    # 2 retries fail, then first dump succeeds
+    recovery_executor._submit_and_wait = AsyncMock(side_effect=[
+        _fail_leg2_submit("tecPATH_PARTIAL"),
+        _fail_leg2_submit("tecPATH_PARTIAL"),
+        {"success": True, "tx_hash": "DUMP_OK", "engine_result": "tesSUCCESS", "validated": True},
+    ])
+
+    trade_data = {"iou_amount_delivered": "2.5", "profit_pct": "1.0"}
+    leg1_result = {"tx_hash": "LEG1", "engine_result": "tesSUCCESS", "validated": True}
+
+    await recovery_executor._recover(
+        same_issuer_opp, leg1_result, {"TransactionType": "Payment"},
+        trade_data, reason="leg2_failed",
+    )
+    logged = mock_log.call_args[0][0]
+    assert logged["recovery_outcome"] == "dump_succeeded_attempt_1"
+    # Loss recorded as negative (RECOVERY_MAX_LOSS_PCT * input_xrp)
+    call_arg = recovery_executor.circuit_breaker.record_trade.call_args[0][0]
+    assert call_arg < Decimal("0")
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+async def test_recover_all_fail_triggers_halt_and_blacklist(
+    mock_alert, mock_log,
+    same_issuer_opp, recovery_executor,
+):
+    """All retries + all dumps fail → halt_for + block_route + return False."""
+    # 2 retries fail, 2 dumps fail
+    recovery_executor._submit_and_wait = AsyncMock(return_value=_fail_leg2_submit())
+
+    trade_data = {"iou_amount_delivered": "2.5", "profit_pct": "1.0"}
+    leg1_result = {"tx_hash": "LEG1", "engine_result": "tesSUCCESS", "validated": True}
+
+    result = await recovery_executor._recover(
+        same_issuer_opp, leg1_result, {"TransactionType": "Payment"},
+        trade_data, reason="leg2_failed",
+    )
+    assert result is False
+    logged = mock_log.call_args[0][0]
+    assert logged["recovery_outcome"] == "halt_and_blacklist"
+
+    # Both safety mechanisms fired
+    recovery_executor.circuit_breaker.halt_for.assert_called_once()
+    halt_call = recovery_executor.circuit_breaker.halt_for.call_args
+    assert halt_call.kwargs["hours"] > 0
+    recovery_executor.blacklist.block_route.assert_called_once_with(
+        same_issuer_opp.route_key()
     )
 
-    assert result is False
-    mock_log.assert_called_once()
-    logged = mock_log.call_args[0][0]
-    assert logged["recovery_stub"] is True
-    assert logged["recovery_reason"] == "leg2_failed: tecPATH_DRY"
-    mock_alert.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_recover_zero_iou_skips_dump_goes_straight_to_halt(
+    same_issuer_opp, recovery_executor,
+):
+    """If iou_amount_delivered is 0 (nothing actually delivered), skip dump
+    and escalate straight to halt."""
+    recovery_executor._submit_and_wait = AsyncMock(return_value=_fail_leg2_submit())
+
+    trade_data = {"iou_amount_delivered": "0", "profit_pct": "1.0"}
+    leg1_result = {"tx_hash": "LEG1", "engine_result": "tesSUCCESS", "validated": True}
+
+    with patch("src.executor.log_trade", new_callable=AsyncMock), \
+         patch("src.executor.send_alert", new_callable=AsyncMock):
+        await recovery_executor._recover(
+            same_issuer_opp, leg1_result, {"TransactionType": "Payment"},
+            trade_data, reason="leg2_failed",
+        )
+    recovery_executor.circuit_breaker.halt_for.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Market-dump + startup-drain builders
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMarketDumpTx:
+    def test_shape(self, same_issuer_opp):
+        from src.executor import _build_market_dump_tx
+        tx = _build_market_dump_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        assert tx["TransactionType"] == "Payment"
+        assert tx["Account"] == WALLET_ADDR
+        assert tx["Destination"] == WALLET_ADDR
+
+    def test_amount_is_floor_in_drops(self, same_issuer_opp):
+        """Amount = input_xrp * (1 - max_loss_pct) * DROPS_PER_XRP."""
+        from src.executor import _build_market_dump_tx
+        from src.config import RECOVERY_MAX_LOSS_PCT
+        tx = _build_market_dump_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        expected = int(
+            same_issuer_opp.input_xrp * (Decimal("1") - RECOVERY_MAX_LOSS_PCT)
+            * Decimal("1000000")
+        )
+        assert tx["Amount"] == str(expected)
+
+    def test_sendmax_is_iou_held(self, same_issuer_opp):
+        from src.executor import _build_market_dump_tx
+        tx = _build_market_dump_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        assert tx["SendMax"]["value"] == "2.5"
+        assert tx["SendMax"]["issuer"] == BUY_ISSUER
+
+    def test_no_partial_payment_flag(self, same_issuer_opp):
+        """Atomic floor requires non-partial semantics."""
+        from src.executor import _build_market_dump_tx
+        tx = _build_market_dump_tx(WALLET_ADDR, same_issuer_opp, Decimal("2.5"))
+        assert "Flags" not in tx
+
+    def test_cross_issuer_routes_paths(self, cross_issuer_opp):
+        from src.executor import _build_market_dump_tx
+        tx = _build_market_dump_tx(WALLET_ADDR, cross_issuer_opp, Decimal("1.5"))
+        assert "Paths" in tx
+        assert tx["Paths"][0][0]["issuer"] == SELL_ISSUER
+
+    def test_zero_iou_held_raises(self, same_issuer_opp):
+        from src.executor import _build_market_dump_tx
+        with pytest.raises(ValueError):
+            _build_market_dump_tx(WALLET_ADDR, same_issuer_opp, Decimal("0"))
+
+
+class TestBuildStartupDrainTx:
+    def test_shape_and_partial_flag(self):
+        from src.executor import _build_startup_drain_tx, _TF_PARTIAL_PAYMENT
+        tx = _build_startup_drain_tx(
+            WALLET_ADDR, "USD", BUY_ISSUER, Decimal("3.14"),
+        )
+        assert tx["TransactionType"] == "Payment"
+        assert tx["Flags"] == _TF_PARTIAL_PAYMENT
+        assert tx["Amount"] == "1000000000"  # ceiling, partial semantics
+        assert tx["SendMax"]["value"] == "3.14"
+        assert tx["SendMax"]["currency"] == "USD"
+
+    def test_zero_balance_raises(self):
+        from src.executor import _build_startup_drain_tx
+        with pytest.raises(ValueError):
+            _build_startup_drain_tx(WALLET_ADDR, "USD", BUY_ISSUER, Decimal("0"))
+
+
+# ---------------------------------------------------------------------------
+# TradeExecutor.drain_iou (startup recovery)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drain_iou_success(recovery_executor):
+    """drain_iou returns True on successful dump."""
+    recovery_executor._submit_and_wait = AsyncMock(return_value={
+        "success": True, "tx_hash": "DRAIN_OK",
+        "engine_result": "tesSUCCESS", "validated": True,
+    })
+    ok = await recovery_executor.drain_iou("USD", BUY_ISSUER, Decimal("1.23"))
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_drain_iou_autofill_failure_returns_false(recovery_executor):
+    recovery_executor._fetch_account_info = AsyncMock(return_value=None)
+    ok = await recovery_executor.drain_iou("USD", BUY_ISSUER, Decimal("1.23"))
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_drain_iou_submit_failure_returns_false(recovery_executor):
+    recovery_executor._submit_and_wait = AsyncMock(return_value={
+        "success": False, "tx_hash": "DRAIN_FAIL",
+        "engine_result": "tecPATH_DRY", "validated": True,
+    })
+    ok = await recovery_executor.drain_iou("USD", BUY_ISSUER, Decimal("1.23"))
+    assert ok is False
