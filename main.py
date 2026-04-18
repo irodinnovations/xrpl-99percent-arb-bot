@@ -26,6 +26,7 @@ import asyncio
 import logging
 import time as _time
 from decimal import Decimal
+from typing import Optional
 
 from xrpl.wallet import Wallet
 
@@ -55,10 +56,13 @@ async def _execute_opportunities(
     executor: TradeExecutor,
     dry_run: bool,
     trigger: str = "",
+    current_balance: Optional[Decimal] = None,
 ) -> None:
     """Execute opportunities and fire-and-forget AI reviews.
 
-    Shared by all scan triggers (ledger close, book_changes).
+    Shared by all scan triggers (ledger close, book_changes). Passes the
+    fresh balance reading through to the executor so its MIN_BALANCE_GUARD
+    check can short-circuit trades when the wallet is draining.
     """
     for opp in opportunities:
         label = f"{trigger} " if trigger else ""
@@ -66,7 +70,7 @@ async def _execute_opportunities(
             f"{label}Opportunity: {opp.profit_pct:.4f}% profit | "
             f"In: {opp.input_xrp} XRP -> Out: {opp.output_xrp} XRP"
         )
-        result = await executor.execute(opp)
+        result = await executor.execute(opp, current_balance=current_balance)
         if result:
             trade_review_data = {
                 "profit_pct": str(opp.profit_pct),
@@ -169,7 +173,10 @@ async def main():
                     volatility_tracker=volatility_tracker,
                 )
 
-                await _execute_opportunities(opportunities, executor, DRY_RUN)
+                await _execute_opportunities(
+                    opportunities, executor, DRY_RUN,
+                    current_balance=balance,
+                )
 
                 if scan_count % 5 == 0:
                     global_vol = volatility_tracker.get_global_volatility()
@@ -224,7 +231,9 @@ async def main():
                 )
 
                 await _execute_opportunities(
-                    opportunities, executor, DRY_RUN, trigger="book_changes"
+                    opportunities, executor, DRY_RUN,
+                    trigger="book_changes",
+                    current_balance=balance,
                 )
 
         except Exception as e:

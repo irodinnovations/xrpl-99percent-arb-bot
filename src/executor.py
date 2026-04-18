@@ -47,7 +47,12 @@ from xrpl.core.binarycodec import encode as xrpl_encode, encode_for_signing
 from xrpl.core.keypairs import sign as keypairs_sign
 from xrpl.wallet import Wallet
 
-from src.config import XRPL_RPC_URL, DRY_RUN
+from src.config import (
+    XRPL_RPC_URL,
+    DRY_RUN,
+    MAX_TRADE_XRP_ABS,
+    MIN_BALANCE_GUARD_PCT,
+)
 from src.pathfinder import Opportunity
 from src.simulator import (
     simulate_transaction,
@@ -257,8 +262,18 @@ class TradeExecutor:
     # Public entry point
     # ------------------------------------------------------------------
 
-    async def execute(self, opportunity: Opportunity) -> bool:
+    async def execute(
+        self,
+        opportunity: Opportunity,
+        current_balance: Optional[Decimal] = None,
+    ) -> bool:
         """Run an opportunity through the two-leg pipeline.
+
+        `current_balance` is used by the MIN_BALANCE_GUARD_PCT check to
+        short-circuit all trading if the account balance has drifted below
+        a safe fraction of the circuit breaker's reference balance. Callers
+        that already have a fresh balance reading should pass it; older
+        call sites can omit it and the guard is skipped.
 
         Returns True when a paper or live trade was recorded, False when
         the opportunity was skipped or rejected.
@@ -272,14 +287,49 @@ class TradeExecutor:
             logger.warning("Path is blacklisted — skipping trade")
             return False
 
-        # Legacy multi-hop opps (from ripple_path_find) have no two-leg
-        # metadata. Skip them cleanly — phase B4 rewrites pathfinder.
-        if not opportunity.iou_currency or not opportunity.buy_issuer:
-            logger.info(
-                "Skipping legacy multi-hop opportunity (no two-leg metadata "
-                "— phase B4 will rewrite pathfinder to emit two-leg shape)"
+        # Time-expiring route block (populated by recovery flow + sim
+        # failure counter). Auto-clears after ROUTE_BLACKLIST_HOURS.
+        if self.blacklist.is_route_blocked(opportunity.route_key()):
+            logger.warning(
+                f"Route {opportunity.route_key()} is time-blacklisted — skipping"
             )
             return False
+
+        # Defensive skip for any opportunity missing two-leg metadata.
+        # B4 removed multi-hop emission, but this guard keeps the executor
+        # safe if a caller ever hand-builds an Opportunity without the
+        # required fields.
+        if not opportunity.iou_currency or not opportunity.buy_issuer:
+            logger.info(
+                "Skipping opportunity without two-leg metadata "
+                "(iou_currency/buy_issuer unset)"
+            )
+            return False
+
+        # ---- balance guards --------------------------------------------------
+        # Absolute cap — defense against balance-calculation bugs in the
+        # pathfinder's position sizing.
+        if opportunity.input_xrp > MAX_TRADE_XRP_ABS:
+            logger.warning(
+                f"Trade size {opportunity.input_xrp} XRP exceeds "
+                f"MAX_TRADE_XRP_ABS {MAX_TRADE_XRP_ABS} — skipping"
+            )
+            return False
+
+        # Percentage guard — skip if balance has drifted below the
+        # reference floor. Only enforced when caller supplies a balance
+        # and the circuit breaker has a reference snapshot.
+        if current_balance is not None:
+            ref = self.circuit_breaker.reference_balance
+            if ref > Decimal("0"):
+                ratio = current_balance / ref
+                if ratio < MIN_BALANCE_GUARD_PCT:
+                    logger.critical(
+                        f"Balance guard tripped: current {current_balance} XRP "
+                        f"is {ratio:.4f} of reference {ref} XRP "
+                        f"(floor {MIN_BALANCE_GUARD_PCT}) — halting trade"
+                    )
+                    return False
 
         # ---- autofill: Sequence + current ledger -----------------------------
         account_info = await self._fetch_account_info()
@@ -304,6 +354,7 @@ class TradeExecutor:
                 f"Leg 1 simulation FAILED ({leg1_sim.result_code}) — "
                 f"route rejected, no state acquired"
             )
+            self.blacklist.record_sim_failure(opportunity.route_key())
             return False
 
         iou_delivered = leg1_sim.delivered_iou_value()
@@ -335,6 +386,7 @@ class TradeExecutor:
                 f"Leg 2 simulation FAILED ({leg2_sim.result_code}) — "
                 f"route rejected, no state acquired"
             )
+            self.blacklist.record_sim_failure(opportunity.route_key())
             return False
 
         # ---- paper / live branch --------------------------------------------

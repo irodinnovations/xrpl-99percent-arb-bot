@@ -58,16 +58,21 @@ def same_issuer_opp():
 
 @pytest.fixture
 def cross_issuer_opp():
-    """Cross-issuer arbitrage (different buy/sell issuers)."""
+    """Cross-issuer arbitrage (different buy/sell issuers).
+
+    input_xrp kept under MAX_TRADE_XRP_ABS (5.0 default) so tests don't
+    trip the B5 absolute-cap guard; the absolute-cap behavior has its
+    own dedicated test with an explicitly oversized opportunity.
+    """
     return Opportunity(
-        input_xrp=Decimal("10"),
-        output_xrp=Decimal("10.12"),
+        input_xrp=Decimal("3"),
+        output_xrp=Decimal("3.036"),
         profit_pct=Decimal("1.2"),
         profit_ratio=Decimal("0.012"),
         iou_currency="USD",
         buy_issuer=BUY_ISSUER,
         sell_issuer=SELL_ISSUER,
-        iou_amount=Decimal("5.0"),
+        iou_amount=Decimal("1.5"),
         paths=[],
         source_currency="XRP",
     )
@@ -98,6 +103,7 @@ def mock_circuit_breaker():
 def mock_blacklist():
     bl = MagicMock()
     bl.is_blacklisted.return_value = False
+    bl.is_route_blocked.return_value = False
     return bl
 
 
@@ -388,7 +394,14 @@ async def test_blacklisted_route_skips(
 async def test_legacy_multihop_opp_is_skipped(
     multihop_legacy_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
 ):
-    """Multi-hop opps without two-leg metadata must be skipped, not crash."""
+    """Opps lacking two-leg metadata must be skipped, not crash.
+
+    B4 removed multi-hop emission; this defends against any caller that
+    hand-builds an Opportunity without iou_currency/buy_issuer.
+    """
+    # Use a real-shaped mock that doesn't claim every route_key is blocked
+    mock_blacklist.is_route_blocked.return_value = False
+
     executor = TradeExecutor(
         wallet=mock_wallet,
         circuit_breaker=mock_circuit_breaker,
@@ -400,6 +413,123 @@ async def test_legacy_multihop_opp_is_skipped(
     )
     result = await executor.execute(multihop_legacy_opp)
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_route_blocked_skips(
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    """A time-blacklisted route must be skipped before autofill runs."""
+    mock_blacklist.is_route_blocked.return_value = True
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+    )
+    executor._fetch_account_info = AsyncMock(
+        side_effect=AssertionError("should not be called for blocked route")
+    )
+    result = await executor.execute(same_issuer_opp)
+    assert result is False
+    mock_blacklist.is_route_blocked.assert_called_with(same_issuer_opp.route_key())
+
+
+@pytest.mark.asyncio
+async def test_trade_exceeds_abs_cap_skips(
+    mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    """A trade whose input_xrp exceeds MAX_TRADE_XRP_ABS must be skipped
+    regardless of percentage-based sizing."""
+    oversized = Opportunity(
+        input_xrp=Decimal("100"),  # 100 XRP > MAX_TRADE_XRP_ABS (5.0 default)
+        output_xrp=Decimal("101"),
+        profit_pct=Decimal("1.0"),
+        profit_ratio=Decimal("0.01"),
+        iou_currency="USD",
+        buy_issuer=BUY_ISSUER,
+        sell_issuer=BUY_ISSUER,
+        iou_amount=Decimal("50"),
+        paths=[],
+    )
+    mock_blacklist.is_route_blocked.return_value = False
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+    )
+    executor._fetch_account_info = AsyncMock(
+        side_effect=AssertionError("should not be reached")
+    )
+    result = await executor.execute(oversized)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_trips_below_floor(
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    """If current balance is below MIN_BALANCE_GUARD_PCT of reference, skip."""
+    mock_blacklist.is_route_blocked.return_value = False
+    mock_circuit_breaker.reference_balance = Decimal("100")
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+    )
+    executor._fetch_account_info = AsyncMock(
+        side_effect=AssertionError("should not be reached")
+    )
+    # 85 / 100 = 0.85 which is under the 0.95 default floor
+    result = await executor.execute(same_issuer_opp, current_balance=Decimal("85"))
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_balance_guard_not_tripped_when_balance_ok(
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet
+):
+    """Balance above floor lets the trade proceed past the guard."""
+    mock_blacklist.is_route_blocked.return_value = False
+    mock_circuit_breaker.reference_balance = Decimal("100")
+    with patch("src.executor.log_trade", new_callable=AsyncMock), \
+         patch("src.executor.send_alert", new_callable=AsyncMock), \
+         patch("src.executor.simulate_transaction", new_callable=AsyncMock) as mock_sim:
+        mock_sim.side_effect = [_leg1_sim_success("2.5"), _leg2_sim_success()]
+        executor = TradeExecutor(
+            wallet=mock_wallet,
+            circuit_breaker=mock_circuit_breaker,
+            blacklist=mock_blacklist,
+            dry_run=True,
+        )
+        _patch_autofill(executor)
+        # 98 / 100 = 0.98 >= 0.95 floor → trade proceeds
+        result = await executor.execute(
+            same_issuer_opp, current_balance=Decimal("98")
+        )
+        assert result is True
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.simulate_transaction", new_callable=AsyncMock)
+async def test_leg1_sim_failure_records_to_blacklist(
+    mock_sim, mock_log,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
+):
+    """Sim failures feed the route-level failure counter for auto-blacklisting."""
+    mock_blacklist.is_route_blocked.return_value = False
+    mock_sim.return_value = SimResult(success=False, result_code="tecPATH_DRY")
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=True,
+    )
+    _patch_autofill(executor)
+    await executor.execute(same_issuer_opp)
+    mock_blacklist.record_sim_failure.assert_called_once_with(
+        same_issuer_opp.route_key()
+    )
 
 
 # ===========================================================================
@@ -477,7 +607,7 @@ async def test_dry_run_cross_issuer_leg2_has_paths(
     mock_sim, mock_alert, mock_log,
     cross_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
 ):
-    mock_sim.side_effect = [_leg1_sim_success("5.0"), _leg2_sim_success()]
+    mock_sim.side_effect = [_leg1_sim_success("1.5"), _leg2_sim_success()]
 
     executor = TradeExecutor(
         wallet=mock_wallet,

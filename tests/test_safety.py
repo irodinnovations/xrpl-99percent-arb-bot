@@ -99,3 +99,85 @@ class TestBlacklist:
         bl = Blacklist()
         bl.add_currency("SCAM")
         assert bl.is_blacklisted([]) is False
+
+
+class TestBlacklistRouteBlocking:
+    """Route-keyed time-expiring blocks added in Phase B5."""
+
+    def test_route_not_blocked_by_default(self):
+        bl = Blacklist()
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+
+    def test_block_route_sets_entry(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        assert bl.is_route_blocked("USD|rBuy|rSell") is True
+
+    def test_different_route_unaffected(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        assert bl.is_route_blocked("EUR|rOther|rOther") is False
+
+    def test_block_route_auto_expires(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        # Simulate expiry by backdating the stored timestamp
+        bl._route_expiry["USD|rBuy|rSell"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        )
+        # First call triggers purge and auto-clears expired entry
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+        assert "USD|rBuy|rSell" not in bl._route_expiry
+
+    def test_block_route_reblock_extends(self):
+        bl = Blacklist()
+        bl.block_route("USD|rBuy|rSell", hours=1)
+        first_expiry = bl._route_expiry["USD|rBuy|rSell"]
+        bl.block_route("USD|rBuy|rSell", hours=24)
+        second_expiry = bl._route_expiry["USD|rBuy|rSell"]
+        assert second_expiry > first_expiry
+
+
+class TestBlacklistSimFailureCounter:
+    """Sliding-window auto-blocklist: N sim fails → route blocked."""
+
+    def test_first_failure_does_not_block(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        triggered = bl.record_sim_failure("USD|rBuy|rSell")
+        assert triggered is False
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+
+    def test_threshold_reached_auto_blocks(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        bl.record_sim_failure("USD|rBuy|rSell")
+        bl.record_sim_failure("USD|rBuy|rSell")
+        triggered = bl.record_sim_failure("USD|rBuy|rSell")
+        assert triggered is True
+        assert bl.is_route_blocked("USD|rBuy|rSell") is True
+
+    def test_block_clears_counter(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        for _ in range(3):
+            bl.record_sim_failure("USD|rBuy|rSell")
+        # Counter is cleared after triggering a block
+        assert len(bl._sim_failures["USD|rBuy|rSell"]) == 0
+
+    def test_old_failures_outside_window_pruned(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=60)
+        # Two failures 10 minutes ago → outside the 60s window
+        old_ts = datetime.now(timezone.utc) - timedelta(minutes=10)
+        bl._sim_failures["USD|rBuy|rSell"].append(old_ts)
+        bl._sim_failures["USD|rBuy|rSell"].append(old_ts)
+        # New failure should NOT trigger — old ones get pruned
+        triggered = bl.record_sim_failure("USD|rBuy|rSell")
+        assert triggered is False
+        assert bl.is_route_blocked("USD|rBuy|rSell") is False
+
+    def test_different_routes_counted_separately(self):
+        bl = Blacklist(sim_fail_threshold=3, sim_fail_window_seconds=3600)
+        for _ in range(2):
+            bl.record_sim_failure("USD|rA|rB")
+            bl.record_sim_failure("EUR|rC|rD")
+        # Each route has 2 failures — neither at threshold
+        assert bl.is_route_blocked("USD|rA|rB") is False
+        assert bl.is_route_blocked("EUR|rC|rD") is False
