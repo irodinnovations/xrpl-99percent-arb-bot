@@ -111,19 +111,26 @@ def mock_wallet():
 
 
 def _leg1_sim_success(delivered_value: str = "2.5") -> SimResult:
-    """Build a successful leg-1 SimResult with a delivered_amount in meta."""
+    """Build a successful leg-1 SimResult with a delivered_amount populated.
+
+    Populates both the typed `delivered_amount` field (used by the executor
+    via SimResult.delivered_iou_value()) and the raw meta dict (preserved
+    for any callers that still inspect the raw response).
+    """
+    delivered = {
+        "currency": "USD",
+        "issuer": BUY_ISSUER,
+        "value": delivered_value,
+    }
     return SimResult(
         success=True,
         result_code="tesSUCCESS",
+        delivered_amount=delivered,
         raw={
             "engine_result": "tesSUCCESS",
             "meta": {
                 "TransactionResult": "tesSUCCESS",
-                "delivered_amount": {
-                    "currency": "USD",
-                    "issuer": BUY_ISSUER,
-                    "value": delivered_value,
-                },
+                "delivered_amount": delivered,
             },
         },
     )

@@ -40,7 +40,7 @@ Key safety invariants
 
 import asyncio
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Optional
 
 from xrpl.core.binarycodec import encode as xrpl_encode, encode_for_signing
@@ -49,7 +49,13 @@ from xrpl.wallet import Wallet
 
 from src.config import XRPL_RPC_URL, DRY_RUN
 from src.pathfinder import Opportunity
-from src.simulator import simulate_transaction, simulate_transaction_ws, SimResult, HttpRpcClient
+from src.simulator import (
+    simulate_transaction,
+    simulate_transaction_ws,
+    SimResult,
+    HttpRpcClient,
+    extract_delivered_iou,
+)
 from src.safety import CircuitBreaker, Blacklist
 from src.trade_logger import log_trade
 from src.telegram_alerts import send_alert
@@ -199,36 +205,19 @@ def _build_leg2_tx(
     return tx
 
 
+# Backwards-compat alias: `extract_delivered_iou` moved to simulator.py in B3
+# because that's where simulate-response parsing belongs. Executor tests and
+# any external caller can still import _extract_delivered_iou from here.
 def _extract_delivered_iou(sim_raw: Optional[dict]) -> Optional[Decimal]:
-    """Pull the IOU value delivered by a leg-1 simulate response.
+    """Convenience: pull delivered IOU value out of a raw sim response dict.
 
-    rippled attaches `delivered_amount` to meta on any payment that would
-    apply (tesSUCCESS). For XRP->IOU it is the IOU object we just acquired.
-
-    Returns None when the field is missing, XRP-typed, or malformed — the
-    caller treats that as a simulate quality failure and skips the opp.
+    Prefer `SimResult.delivered_iou_value()` in new code — this helper is
+    kept so tests that accept a raw dict don't have to construct SimResult.
     """
     if not sim_raw:
         return None
-
     meta = sim_raw.get("meta") or {}
-    delivered = meta.get("delivered_amount")
-
-    # IOU delivery: object with currency/issuer/value
-    if isinstance(delivered, dict):
-        value = delivered.get("value")
-        if value is None:
-            return None
-        try:
-            parsed = Decimal(str(value))
-        except (InvalidOperation, ValueError):
-            return None
-        if parsed <= Decimal("0"):
-            return None
-        return parsed
-
-    # XRP delivery (string of drops) — not expected on leg 1, treat as None
-    return None
+    return extract_delivered_iou(meta.get("delivered_amount"))
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +306,7 @@ class TradeExecutor:
             )
             return False
 
-        iou_delivered = _extract_delivered_iou(leg1_sim.raw)
+        iou_delivered = leg1_sim.delivered_iou_value()
         if iou_delivered is None:
             logger.warning(
                 "Leg 1 simulation reported no delivered_amount — "
