@@ -679,12 +679,14 @@ async def test_leg1_sim_failure_aborts_before_leg2(
 
 @pytest.mark.asyncio
 @patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
 @patch("src.executor.simulate_transaction", new_callable=AsyncMock)
-async def test_leg2_sim_failure_aborts_with_no_state(
-    mock_sim, mock_log,
+async def test_leg2_real_sim_failure_aborts_with_no_state(
+    mock_sim, mock_alert, mock_log,
     same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
 ):
-    # Leg 1 passes, leg 2 fails
+    """A non-state-dependent leg 2 failure (tecPATH_PARTIAL, tem*, etc)
+    is a real rejection — skip and record to sim-fail counter."""
     mock_sim.side_effect = [
         _leg1_sim_success("2.5"),
         SimResult(success=False, result_code="tecPATH_PARTIAL"),
@@ -703,6 +705,44 @@ async def test_leg2_sim_failure_aborts_with_no_state(
     assert result is False
     assert mock_sim.call_count == 2
     mock_log.assert_not_called()
+    mock_blacklist.record_sim_failure.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+@patch("src.executor.simulate_transaction", new_callable=AsyncMock)
+@pytest.mark.parametrize("code", ["terPRE_SEQ", "tecUNFUNDED_PAYMENT", "tecPATH_DRY"])
+async def test_leg2_state_dependent_failure_proceeds(
+    mock_sim, mock_alert, mock_log,
+    code,
+    same_issuer_opp, mock_circuit_breaker, mock_blacklist, mock_wallet,
+):
+    """State-dependent leg-2 codes (terPRE_SEQ / tecUNFUNDED / tecPATH_DRY)
+    are expected on mainnet pre-sim because the ledger hasn't seen leg 1
+    yet. These must NOT block the opportunity — paper trade still logs."""
+    mock_sim.side_effect = [
+        _leg1_sim_success("2.5"),
+        SimResult(success=False, result_code=code),
+    ]
+
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        dry_run=True,
+    )
+    _patch_autofill(executor)
+
+    result = await executor.execute(same_issuer_opp)
+
+    assert result is True  # paper trade recorded
+    mock_log.assert_called_once()
+    logged = mock_log.call_args[0][0]
+    assert logged["leg2_state_dependent"] is True
+    assert logged["leg2_sim_result"] == code
+    # State-dependent failures must NOT feed the sim-fail blacklist counter
+    mock_blacklist.record_sim_failure.assert_not_called()
 
 
 @pytest.mark.asyncio

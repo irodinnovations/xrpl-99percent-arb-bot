@@ -110,6 +110,27 @@ _RECOVERY_DUMP_ATTEMPTS = 2
 # the ceiling ever binding.
 _DRAIN_XRP_CEILING_DROPS = "1000000000"
 
+# Leg-2 pre-sim failure codes that we accept as "state-dependent":
+# these would resolve once leg 1 actually commits on-chain. rippled's
+# simulate runs against the CURRENT ledger, so any check that depends
+# on the post-leg-1 state legitimately fails here. Phase D empirically
+# confirmed these three on mainnet.
+#
+#   terPRE_SEQ          — Sequence=N+1 is ahead of the account's live
+#                         Sequence=N because leg 1 hasn't validated yet.
+#   tecUNFUNDED_PAYMENT — source doesn't hold the IOU that leg 1 would
+#                         deliver.
+#   tecPATH_DRY         — same root cause viewed through pathfinding.
+#
+# When any of these surface on leg 2 pre-sim, we still treat the
+# opportunity as validated: leg 1 was proved good, and if live leg 1
+# commits the recovery flow + real leg 2 submit take over from here.
+_LEG2_EXPECTED_PRESIM_FAILURES = frozenset({
+    "terPRE_SEQ",
+    "tecUNFUNDED_PAYMENT",
+    "tecPATH_DRY",
+})
+
 
 # ---------------------------------------------------------------------------
 # Module-level transaction builders
@@ -494,23 +515,32 @@ class TradeExecutor:
         leg2_tx["LastLedgerSequence"] = current_ledger + _LEDGER_WINDOW
 
         leg2_sim = await self._simulate(leg2_tx)
+        leg2_state_dependent = False
         if not leg2_sim.success:
-            # Leg 2 sim can legitimately fail on mainnet today because the
-            # account does not yet hold the IOU that leg 1 would deliver.
-            # Treat this as a skip — phase D decides whether to relax the
-            # gate empirically.
-            detail = f" | detail: {leg2_sim.error}" if leg2_sim.error else ""
-            logger.warning(
-                f"Leg 2 simulation FAILED ({leg2_sim.result_code}) — "
-                f"route rejected, no state acquired{detail}"
-            )
-            self.blacklist.record_sim_failure(opportunity.route_key())
-            return False
+            if leg2_sim.result_code in _LEG2_EXPECTED_PRESIM_FAILURES:
+                # rippled's simulate runs on the current ledger, where
+                # leg 1 hasn't applied yet — so Sequence/balance checks
+                # legitimately fail. Accept as state-dependent, proceed.
+                logger.info(
+                    f"Leg 2 pre-sim returned {leg2_sim.result_code} "
+                    f"(state-dependent — expected pre-leg-1). Treating "
+                    f"as pass; live leg 1 will advance the state."
+                )
+                leg2_state_dependent = True
+            else:
+                detail = f" | detail: {leg2_sim.error}" if leg2_sim.error else ""
+                logger.warning(
+                    f"Leg 2 simulation FAILED ({leg2_sim.result_code}) — "
+                    f"route rejected, no state acquired{detail}"
+                )
+                self.blacklist.record_sim_failure(opportunity.route_key())
+                return False
 
         # ---- paper / live branch --------------------------------------------
         base_trade_data = self._build_trade_metadata(
             opportunity, iou_delivered, leg1_sim, leg2_sim
         )
+        base_trade_data["leg2_state_dependent"] = leg2_state_dependent
 
         if self.dry_run:
             return await self._record_dry_run(opportunity, base_trade_data)
