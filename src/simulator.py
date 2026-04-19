@@ -149,6 +149,22 @@ async def simulate_transaction(
             )
 
         result = raw_response.get("result", {})
+
+        # XRPL's JSON-RPC reports `invalidParams` and other request-level
+        # errors *inside* `result` (not at top level). Catch that here so
+        # callers see a useful result_code + error detail instead of the
+        # fallthrough 'unknown'.
+        inner_error = result.get("error") if isinstance(result, dict) else None
+        if inner_error:
+            error_msg = result.get("error_message") or inner_error
+            logger.warning(f"Simulate HTTP returned {inner_error}: {error_msg}")
+            return SimResult(
+                success=False,
+                result_code=str(inner_error),
+                error=str(error_msg),
+                raw=result,
+            )
+
         tx_result = _extract_result_code(result)
 
         delivered = _pull_delivered_amount(result)

@@ -40,7 +40,7 @@ Key safety invariants
 
 import asyncio
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, Context
 from typing import Optional
 
 from xrpl.core.binarycodec import encode as xrpl_encode, encode_for_signing
@@ -119,10 +119,21 @@ _DRAIN_XRP_CEILING_DROPS = "1000000000"
 def _format_iou_value(value: Decimal) -> str:
     """Serialize a Decimal IOU value the way XRPL JSON-RPC expects.
 
-    No scientific notation, no spurious trailing zeros, but significant
-    trailing zeros on integers are preserved (100 stays 100, not 1).
+    XRPL IOU values are limited to 15 significant digits by the rippled
+    binary codec; sending more digits returns invalidParams and blocks
+    the entire tx. Python Decimal produced by `input_xrp / buy_rate`
+    typically has 28 significant digits, so we quantize down to 15
+    with ROUND_DOWN (never overspend on amount delivered).
+
+    Output format rules:
+      - no scientific notation
+      - no spurious trailing zeros after the decimal point
+      - integers keep their own trailing zeros (100 stays "100")
     """
-    s = f"{value:f}"
+    # Quantize to 15 significant digits max. ROUND_DOWN avoids ever
+    # asking rippled to deliver more than our math said was available.
+    trimmed = Context(prec=15, rounding=ROUND_DOWN).create_decimal(value)
+    s = f"{trimmed:f}"
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s or "0"

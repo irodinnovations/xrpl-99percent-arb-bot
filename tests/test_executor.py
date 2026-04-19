@@ -185,6 +185,29 @@ class TestFormatIouValue:
     def test_large_precise_value(self):
         assert _format_iou_value(Decimal("1234567.89012345")) == "1234567.89012345"
 
+    def test_truncates_to_15_significant_digits(self):
+        """XRPL rejects IOU values with >16 sig digits as invalidParams.
+
+        The raw Decimal produced by `position_xrp / buy_rate` often has
+        ~28 sig digits. _format_iou_value must round down to fit.
+        """
+        raw = Decimal("1.637291234567890123456789012")
+        formatted = _format_iou_value(raw)
+        # Strip sign + decimal point to count significant digits
+        sig = formatted.replace(".", "").lstrip("0")
+        assert len(sig) <= 15, f"expected <=15 sig digits, got {len(sig)}: {formatted}"
+        # ROUND_DOWN: quantized value should never exceed the original
+        assert Decimal(formatted) <= raw
+
+    def test_rounds_down_not_up(self):
+        """ROUND_DOWN is critical — we never want to ask the ledger to
+        deliver more than our math said was available."""
+        # 1.9999999999999999 should truncate down to 1.99999999999999
+        # (15 sig digits) not round up to 2.0
+        raw = Decimal("1.9999999999999999")
+        formatted = _format_iou_value(raw)
+        assert Decimal(formatted) <= raw
+
 
 # ===========================================================================
 # Helper: _extract_delivered_iou
