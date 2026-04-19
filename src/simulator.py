@@ -218,14 +218,18 @@ async def simulate_transaction_ws(
             logger.warning("WS simulate returned None — falling back to HTTP")
             return await simulate_transaction(tx_dict)
 
-        # Check for server-level error
+        # Server-level error on the WS channel. Some clio/rippled WS
+        # endpoints reject or mis-route `simulate` even when HTTP-RPC
+        # accepts the identical tx_json. Log the detail and fall back
+        # to HTTP rather than giving up — HTTP is the authoritative
+        # path for this endpoint.
         if "error" in raw_response:
             error_msg = raw_response.get("error", {})
-            return SimResult(
-                success=False,
-                result_code="rpc_error",
-                error=str(error_msg),
+            logger.warning(
+                f"WS simulate returned rpc_error ({error_msg}) — "
+                f"falling back to HTTP"
             )
+            return await simulate_transaction(tx_dict)
 
         result = raw_response.get("result", raw_response)
         tx_result = _extract_result_code(result)

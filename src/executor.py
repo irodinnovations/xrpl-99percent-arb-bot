@@ -455,9 +455,10 @@ class TradeExecutor:
 
         leg1_sim = await self._simulate(leg1_tx)
         if not leg1_sim.success:
+            detail = f" | detail: {leg1_sim.error}" if leg1_sim.error else ""
             logger.warning(
                 f"Leg 1 simulation FAILED ({leg1_sim.result_code}) — "
-                f"route rejected, no state acquired"
+                f"route rejected, no state acquired{detail}"
             )
             self.blacklist.record_sim_failure(opportunity.route_key())
             return False
@@ -487,9 +488,10 @@ class TradeExecutor:
             # account does not yet hold the IOU that leg 1 would deliver.
             # Treat this as a skip — phase D decides whether to relax the
             # gate empirically.
+            detail = f" | detail: {leg2_sim.error}" if leg2_sim.error else ""
             logger.warning(
                 f"Leg 2 simulation FAILED ({leg2_sim.result_code}) — "
-                f"route rejected, no state acquired"
+                f"route rejected, no state acquired{detail}"
             )
             self.blacklist.record_sim_failure(opportunity.route_key())
             return False
