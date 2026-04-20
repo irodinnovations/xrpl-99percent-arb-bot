@@ -99,11 +99,11 @@ Plans:
 **Plans**: 5 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — Config additions (LEG2_TIMEOUT_LEDGERS, PROFIT_THRESHOLD_LOW_LIQ 3-tier) + HIGH_LIQ currency expansion (SOLO, USDT) + issuer docs
-- [ ] 05-02-PLAN.md — Simulator terPRE_SEQ acceptance helper (is_acceptable_sim_result + LEG2_ACCEPTABLE_CODES)
-- [ ] 05-03-PLAN.md — Atomic two-leg executor rewrite (pre-sign + pre-sim + sequential submit + Sequence-burn orphan handling)
-- [ ] 05-04-PLAN.md — Atomic executor test suite (happy path, failure paths, single-writer, Decimal, per-leg logs)
-- [ ] 05-05-PLAN.md — Replay harness for 2026-04-19 incident (4 hashes via @pytest.mark.replay parametrization)
+- [x] 05-01-PLAN.md — Config additions (LEG2_TIMEOUT_LEDGERS, PROFIT_THRESHOLD_LOW_LIQ 3-tier) + HIGH_LIQ currency expansion (SOLO, USDT) + issuer docs
+- [x] 05-02-PLAN.md — Simulator terPRE_SEQ acceptance helper (is_acceptable_sim_result + LEG2_ACCEPTABLE_CODES)
+- [x] 05-03-PLAN.md — Atomic two-leg executor rewrite (pre-sign + pre-sim + sequential submit + Sequence-burn orphan handling)
+- [x] 05-04-PLAN.md — Atomic executor test suite (happy path, failure paths, single-writer, Decimal, per-leg logs)
+- [x] 05-05-PLAN.md — Replay harness for 2026-04-19 incident (4 hashes via @pytest.mark.replay parametrization)
 
 ## Progress
 
