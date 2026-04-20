@@ -1,0 +1,49 @@
+{
+  "incident_date": "2026-04-19",
+  "utc_window": "18:09 - 18:14",
+  "failure_mode": "tecPATH_PARTIAL on leg 2 after ~5-7s drift from leg 1 commit",
+  "currency_pair": "XRP -> USD (GateHub) -> XRP",
+  "issuer": "rhub8VRN55s94qWKDv6jmDy1pUykJzF3wq",
+  "hashes": [
+    {
+      "hash": "2EBD65E8",
+      "note": "First fail ~18:09 UTC",
+      "opportunity": {
+        "input_xrp": "5.0",
+        "output_xrp": "5.04",
+        "profit_pct": "0.8",
+        "profit_ratio": "0.008"
+      }
+    },
+    {
+      "hash": "E8A24309",
+      "note": "Second fail",
+      "opportunity": {
+        "input_xrp": "5.0",
+        "output_xrp": "5.035",
+        "profit_pct": "0.7",
+        "profit_ratio": "0.007"
+      }
+    },
+    {
+      "hash": "1C63E5763115D09F",
+      "note": "Third fail",
+      "opportunity": {
+        "input_xrp": "5.0",
+        "output_xrp": "5.045",
+        "profit_pct": "0.9",
+        "profit_ratio": "0.009"
+      }
+    },
+    {
+      "hash": "D6B62B3121F56901",
+      "note": "Fourth fail ~18:14 UTC",
+      "opportunity": {
+        "input_xrp": "5.0",
+        "output_xrp": "5.032",
+        "profit_pct": "0.64",
+        "profit_ratio": "0.0064"
+      }
+    }
+  ]
+}

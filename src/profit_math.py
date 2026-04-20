@@ -74,17 +74,18 @@ def calculate_position_size(account_balance: Decimal) -> Decimal:
 def get_profit_threshold(currency: str) -> Decimal:
     """Return the profit threshold appropriate for a currency's liquidity class.
 
-    High-liquidity currencies (USD, USDC, RLUSD, EUR) use a lower threshold
-    because slippage is minimal on deep books.  The simulate gate catches
-    bad trades regardless, so the threshold's job is filtering out scan noise.
+    Three-tier model:
+      1. HIGH_LIQ (explicit list) → PROFIT_THRESHOLD_HIGH_LIQ (deep books, low slippage)
+      2. everything else → PROFIT_THRESHOLD_LOW_LIQ (thinner books, higher risk)
 
-    Returns:
-        PROFIT_THRESHOLD_HIGH_LIQ (0.3%) for high-liquidity currencies.
-        PROFIT_THRESHOLD (0.6%) for everything else (medium-liquidity default).
+    The base PROFIT_THRESHOLD stays as the default for PROFIT_THRESHOLD_LOW_LIQ
+    when unset (src/config.py env default 0.010), so a user can still fall
+    through to a single-threshold model by setting both HIGH_LIQ and LOW_LIQ
+    to the same value.
     """
     if currency.upper() in [c.strip().upper() for c in HIGH_LIQ_CURRENCIES]:
         return PROFIT_THRESHOLD_HIGH_LIQ
-    return PROFIT_THRESHOLD
+    return PROFIT_THRESHOLD_LOW_LIQ
 
 
 def calculate_dynamic_position(

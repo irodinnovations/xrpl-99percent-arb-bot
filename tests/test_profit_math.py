@@ -72,3 +72,59 @@ def test_fee_ratio_scales_with_trade_size():
     large_trade = calculate_profit(Decimal("50"), Decimal("50.5"))
     # Same 1% gross profit, but the 12-drop fee matters more on 0.5 XRP
     assert large_trade > small_trade
+
+
+import importlib
+from src.profit_math import get_profit_threshold
+from src.config import (
+    PROFIT_THRESHOLD_HIGH_LIQ,
+    PROFIT_THRESHOLD_LOW_LIQ,
+)
+
+
+def test_get_profit_threshold_high_liq_returns_high_liq():
+    assert get_profit_threshold("USD") == PROFIT_THRESHOLD_HIGH_LIQ
+    assert get_profit_threshold("USDC") == PROFIT_THRESHOLD_HIGH_LIQ
+    assert get_profit_threshold("RLUSD") == PROFIT_THRESHOLD_HIGH_LIQ
+    assert get_profit_threshold("EUR") == PROFIT_THRESHOLD_HIGH_LIQ
+
+
+def test_get_profit_threshold_solo_and_usdt_are_high_liq_after_expansion():
+    # Task 2 added these to the default HIGH_LIQ list
+    assert get_profit_threshold("SOLO") == PROFIT_THRESHOLD_HIGH_LIQ
+    assert get_profit_threshold("USDT") == PROFIT_THRESHOLD_HIGH_LIQ
+
+
+def test_get_profit_threshold_non_high_liq_returns_low_liq():
+    # CLEAN-02: CORE, FUZZY, etc. are in setup_trust_lines.py but NOT in
+    # HIGH_LIQ_CURRENCIES — they must fall through to LOW_LIQ, not base.
+    assert get_profit_threshold("CORE") == PROFIT_THRESHOLD_LOW_LIQ
+    assert get_profit_threshold("FUZZY") == PROFIT_THRESHOLD_LOW_LIQ
+    assert get_profit_threshold("UNKNOWN") == PROFIT_THRESHOLD_LOW_LIQ
+
+
+def test_get_profit_threshold_is_case_insensitive():
+    assert get_profit_threshold("usd") == PROFIT_THRESHOLD_HIGH_LIQ
+    assert get_profit_threshold("Solo") == PROFIT_THRESHOLD_HIGH_LIQ
+
+
+def test_get_profit_threshold_returns_decimal_never_float():
+    from decimal import Decimal
+    result = get_profit_threshold("CORE")
+    assert isinstance(result, Decimal)
+    assert not isinstance(result, float)
+
+
+def test_get_profit_threshold_low_liq_env_override(monkeypatch):
+    monkeypatch.setenv("PROFIT_THRESHOLD_LOW_LIQ", "0.015")
+    import src.config as config_mod
+    import src.profit_math as pm_mod
+    importlib.reload(config_mod)
+    importlib.reload(pm_mod)
+    try:
+        from decimal import Decimal
+        assert pm_mod.get_profit_threshold("CORE") == Decimal("0.015")
+    finally:
+        monkeypatch.delenv("PROFIT_THRESHOLD_LOW_LIQ", raising=False)
+        importlib.reload(config_mod)
+        importlib.reload(pm_mod)

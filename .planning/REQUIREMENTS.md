@@ -82,6 +82,30 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **DEP-06**: README includes 7-day paper-trading review criteria checklist
 - [x] **DEP-07**: README includes instructions to switch from paper to live with minimal capital (10-20 XRP)
 
+### Atomic Two-Leg Submit (Phase 5)
+
+- [ ] **ATOM-01**: Both legs of an arbitrage trade are fully built and signed BEFORE leg 1 is submitted to the network
+- [ ] **ATOM-02**: Legs use sequential `Sequence` numbers (N, N+1) so they can apply in the same or adjacent ledger
+- [ ] **ATOM-03**: Leg 2 is submitted immediately after leg 1 submission returns (no wait for leg 1 ledger validation)
+- [ ] **ATOM-04**: If leg 1 fails with a terminal code (tec*/tef*/tem*), leg 2 is cancelled (or its Sequence deliberately burned via no-op) so no orphaned signed tx can be replayed later
+- [ ] **ATOM-05**: If leg 2 fails AFTER leg 1 commits on-ledger, existing 2% market-dump recovery flow activates (current behavior preserved)
+- [ ] **ATOM-06**: Pre-submission check ensures the wallet account is the single writer during the arb window (no concurrent tx consuming the pre-signed Sequence numbers)
+- [ ] **ATOM-07**: `simulate` RPC runs for BOTH legs before leg 1 submission; leg 2 returning `terPRE_SEQ` is treated as pass (state-dependent, expected before leg 1 commits)
+- [ ] **ATOM-08**: All financial math in the two-leg flow continues to use `decimal.Decimal` (SAFE-04 preserved)
+- [ ] **ATOM-09**: Bot logs each leg's submit result, Sequence number, and ledger index to `xrpl_arb_log.jsonl` for post-trade audit
+- [ ] **ATOM-10**: Atomic submit is the default execution path when `DRY_RUN=False`; the previous sequential-submit path is removed (no dead code)
+
+### Currency Universe Expansion (Phase 5)
+
+- [ ] **CURR-01**: `HIGH_LIQ_CURRENCIES` is expanded beyond `USD,USDC,RLUSD,EUR` to include additional liquid XRPL currencies (at minimum: SOLO plus one more, chosen during research)
+- [ ] **CURR-02**: Adding or removing a currency requires only an `.env` config change — no code edits
+- [ ] **CURR-03**: Every currency in `HIGH_LIQ_CURRENCIES` has at least one trusted issuer address configured and documented in `.env.example`
+
+### Dead-Knob Cleanup (Phase 5)
+
+- [ ] **CLEAN-01**: `LEG2_TIMEOUT_LEDGERS` is either wired into `src/executor.py` (replacing the hardcoded `_LEDGER_WINDOW = 4`) OR removed from `src/config.py` and `.env.example`
+- [ ] **CLEAN-02**: `PROFIT_THRESHOLD_LOW_LIQ` is either returned by `get_profit_threshold()` for non-HIGH_LIQ currencies OR removed from `src/config.py` and `src/profit_math.py`
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -157,10 +181,25 @@ Deferred to future release. Tracked but not in current roadmap.
 | DEP-05 | Phase 4 | Complete |
 | DEP-06 | Phase 4 | Complete |
 | DEP-07 | Phase 4 | Complete |
+| ATOM-01 | Phase 5 | Planned |
+| ATOM-02 | Phase 5 | Planned |
+| ATOM-03 | Phase 5 | Planned |
+| ATOM-04 | Phase 5 | Planned |
+| ATOM-05 | Phase 5 | Planned |
+| ATOM-06 | Phase 5 | Planned |
+| ATOM-07 | Phase 5 | Planned |
+| ATOM-08 | Phase 5 | Planned |
+| ATOM-09 | Phase 5 | Planned |
+| ATOM-10 | Phase 5 | Planned |
+| CURR-01 | Phase 5 | Planned |
+| CURR-02 | Phase 5 | Planned |
+| CURR-03 | Phase 5 | Planned |
+| CLEAN-01 | Phase 5 | Planned |
+| CLEAN-02 | Phase 5 | Planned |
 
 **Coverage:**
-- v1 requirements: 42 total
-- Mapped to phases: 42
+- v1 requirements: 42 total (all complete)
+- Phase 5 requirements: 15 total (all planned)
 - Unmapped: 0
 
 ---

@@ -28,6 +28,36 @@ class SimResult:
     error: Optional[str] = None
 
 
+# Leg-2 simulate acceptance set (ATOM-07).
+# When the atomic two-leg executor (src/executor.py) pre-simulates leg 2
+# against CURRENT ledger state, leg 2's Sequence is N+1 while the account's
+# Sequence is N — rippled returns `terPRE_SEQ` ("sequence ahead of account
+# sequence"). That is the state-dependent "would pass once leg 1 applies"
+# signal and MUST be treated as a pass for leg-2 sims only. Leg 1 always
+# uses exact `tesSUCCESS`.
+# See: https://xrpl.org/docs/references/protocol/transactions/transaction-results/ter-codes
+LEG2_ACCEPTABLE_CODES: frozenset[str] = frozenset({"tesSUCCESS", "terPRE_SEQ"})
+
+
+def is_acceptable_sim_result(result_code: str, *, is_leg_2: bool) -> bool:
+    """Whitelist check for simulate result codes.
+
+    Leg 1 must be exact `tesSUCCESS` (strict gate — an "unknown" or
+    `terPRE_SEQ` on leg 1 would indicate the account Sequence was
+    misconfigured and is never acceptable).
+
+    Leg 2 accepts `tesSUCCESS` OR `terPRE_SEQ` — the latter is the
+    canonical state-dependent pass when Sequence N+1 is simulated
+    against account Sequence N.
+
+    This helper is consumed by the atomic executor; the standard
+    SimResult.success flag is unchanged (still strict tesSUCCESS).
+    """
+    if is_leg_2:
+        return result_code in LEG2_ACCEPTABLE_CODES
+    return result_code == "tesSUCCESS"
+
+
 class RpcClientProtocol(Protocol):
     """Protocol for the RPC client used in simulate — allows mocking in tests."""
 

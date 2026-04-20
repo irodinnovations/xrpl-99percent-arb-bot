@@ -46,8 +46,15 @@ PROFIT_THRESHOLD_LOW_LIQ: Decimal = Decimal(
     os.getenv("PROFIT_THRESHOLD_LOW_LIQ", "0.010")
 )
 HIGH_LIQ_CURRENCIES: list[str] = os.getenv(
-    "HIGH_LIQ_CURRENCIES", "USD,USDC,RLUSD,EUR"
+    "HIGH_LIQ_CURRENCIES", "USD,USDC,RLUSD,EUR,SOLO,USDT"
 ).split(",")
+
+# LastLedgerSequence offset used for BOTH legs of atomic two-leg arbitrage
+# submission. At 4 ledgers (~20s) this matches the current inline hardcode
+# that the new atomic executor replaces. Raise cautiously — a larger window
+# means a pre-signed leg 2 blob stays valid longer if leg 1 fails; the
+# no-op AccountSet burn (Plan 05-03) mitigates replay but lower is safer.
+LEG2_TIMEOUT_LEDGERS: int = int(os.getenv("LEG2_TIMEOUT_LEDGERS", "4"))
 
 # Dynamic position sizing range (MIN to MAX_POSITION_PCT)
 MIN_POSITION_PCT: Decimal = Decimal(os.getenv("MIN_POSITION_PCT", "0.01"))
