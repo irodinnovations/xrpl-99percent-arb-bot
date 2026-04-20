@@ -16,6 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Backtester + AI Brain** - Historical replay backtesting and async Claude post-trade pattern analysis (completed 2026-04-10)
 - [x] **Phase 3: Streamlit Dashboard** - Real-time read-only web dashboard fed from the shared JSONL log (completed 2026-04-10)
 - [x] **Phase 4: Deployment** - systemd service, non-root user, .env.example, README, and Hostinger coexistence guide (completed 2026-04-10)
+- [ ] **Phase 5: Atomic Two-Leg Submit + Currency Expansion** - Pre-sign both legs and submit back-to-back with sequential Sequence numbers to eliminate the 5-7s inter-leg drift that caused the 2026-04-19 live-trade losses; expand HIGH_LIQ_CURRENCIES beyond USD/USDC/RLUSD/EUR
 
 ## Phase Details
 
@@ -83,10 +84,31 @@ Plans:
 - [x] 04-01: systemd service + user setup — xrplbot user creation, service file with resource limits, enable/start workflow
 - [x] 04-02: .env.example + README — all env vars documented, Hostinger deployment guide, OpenClaw coexistence notes, 7-day paper review checklist, live-trading switchover instructions
 
+### Phase 5: Atomic Two-Leg Submit + Currency Expansion
+**Goal**: The bot pre-signs BOTH legs of an arbitrage trade before submitting leg 1, uses sequential Sequence numbers (N, N+1) so both legs apply in the same or adjacent ledger, eliminating the 5-7s inter-leg drift window that caused 4 consecutive tecPATH_PARTIAL live-trade losses on 2026-04-19. Also expands HIGH_LIQ_CURRENCIES beyond the current USD/USDC/RLUSD/EUR to widen the opportunity net during calm market regimes. Dead config knobs (LEG2_TIMEOUT_LEDGERS, PROFIT_THRESHOLD_LOW_LIQ) are either wired in or removed.
+**Depends on**: Phase 4
+**Requirements**: ATOM-01, ATOM-02, ATOM-03, ATOM-04, ATOM-05, ATOM-06, ATOM-07, ATOM-08, ATOM-09, ATOM-10, CURR-01, CURR-02, CURR-03, CLEAN-01, CLEAN-02
+**Success Criteria** (what must be TRUE):
+  1. Both legs of an arbitrage trade are fully signed with sequential Sequence numbers BEFORE leg 1 is submitted to the network
+  2. Leg 2 is submitted immediately after leg 1's submit call returns — no `ripple_path_find` re-run, no wait for leg 1 ledger validation
+  3. If leg 1 fails terminally (tec*/tef*/tem*), leg 2 is cancelled or its Sequence deliberately burned so no orphaned signed transaction remains replayable
+  4. Paper-trading replay against the 2026-04-19 incident data shows atomic submit would have succeeded on all 4 trades that failed under sequential submit
+  5. `HIGH_LIQ_CURRENCIES` can be extended via `.env` alone (no code changes) and the new list is picked up on bot restart
+  6. Both dead knobs (`LEG2_TIMEOUT_LEDGERS`, `PROFIT_THRESHOLD_LOW_LIQ`) are resolved — each either wired into live code paths or removed from config
+  7. All existing 194 tests continue to pass, plus new tests cover both-succeed, leg-1-fail, leg-2-fail-after-leg-1-commit, and Sequence-burn scenarios
+**Plans**: 5 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — Config additions (LEG2_TIMEOUT_LEDGERS, PROFIT_THRESHOLD_LOW_LIQ 3-tier) + HIGH_LIQ currency expansion (SOLO, USDT) + issuer docs
+- [ ] 05-02-PLAN.md — Simulator terPRE_SEQ acceptance helper (is_acceptable_sim_result + LEG2_ACCEPTABLE_CODES)
+- [ ] 05-03-PLAN.md — Atomic two-leg executor rewrite (pre-sign + pre-sim + sequential submit + Sequence-burn orphan handling)
+- [ ] 05-04-PLAN.md — Atomic executor test suite (happy path, failure paths, single-writer, Decimal, per-leg logs)
+- [ ] 05-05-PLAN.md — Replay harness for 2026-04-19 incident (4 hashes via @pytest.mark.replay parametrization)
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -94,3 +116,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 2. Backtester + AI Brain | 2/2 | Complete   | 2026-04-10 |
 | 3. Streamlit Dashboard | 2/2 | Complete   | 2026-04-10 |
 | 4. Deployment | 2/2 | Complete   | 2026-04-10 |
+| 5. Atomic Two-Leg Submit + Currency Expansion | 0/5 | Planning   | -          |
