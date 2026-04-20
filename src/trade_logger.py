@@ -62,3 +62,98 @@ async def log_trade(data: dict) -> None:
         logger.debug(f"Trade logged to {LOG_FILE}")
     except OSError as e:
         logger.error(f"Failed to write trade log: {e}")
+
+
+async def log_trade_leg(
+    *,
+    leg: int,
+    sequence: int,
+    hash: str,
+    engine_result: str,
+    ledger_index: int,
+    dry_run: bool,
+    latency_from_leg1_ms: int | None = None,
+    path_used: list | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Append a per-leg JSONL entry for atomic two-leg submission (ATOM-09).
+
+    Schema is ADDITIVE vs log_trade — readers (dashboard, backtester) that look up
+    specific keys continue to work; they only need to filter by `entry_type == "leg"`
+    if they want to ignore per-leg rows.
+
+    The `path_used` field (added per plan-checker Warning 5) captures the actual
+    Paths array for the submitted leg so post-incident analysis can distinguish
+    "atomic submit wasn't the fix" from "path splitting needed" if leg 2 ever
+    fails tecPATH_PARTIAL despite the atomic window.
+
+    Required positional-only fields enforced by keyword-only signature so future
+    additions don't accidentally shift positions.
+    """
+    entry = {
+        "entry_type": "leg",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "leg": leg,
+        "sequence": sequence,
+        "hash": hash,
+        "engine_result": engine_result,
+        "ledger_index": ledger_index,
+        "dry_run": dry_run,
+    }
+    if latency_from_leg1_ms is not None:
+        entry["latency_from_leg1_ms"] = int(latency_from_leg1_ms)
+    if path_used is not None:
+        entry["path_used"] = path_used
+    if extra:
+        entry.update(extra)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except OSError as e:
+        logger.error(f"Failed to write leg log: {e}")
+
+
+async def log_trade_summary(
+    *,
+    outcome: str,
+    dry_run: bool,
+    profit_pct: "Decimal | str | None" = None,
+    net_profit_xrp: "Decimal | str | None" = None,
+    leg1_hash: str | None = None,
+    leg2_hash: str | None = None,
+    error: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Append a trade-level summary entry aggregating both legs.
+
+    `outcome` values used by the atomic executor:
+      - "both_legs_success"
+      - "leg1_fail_burned"            (leg 1 tec/tef/tem; leg 2 Sequence burned via AccountSet)
+      - "leg1_fail_burn_failed"       (leg 1 failed AND the burn also failed — escalated alert)
+      - "leg2_fail_recovery_activated"(leg 1 committed, leg 2 failed, 2% recovery hit)
+      - "dry_run_would_execute"       (DRY_RUN=True, would-execute log)
+      - "pre_submit_gate_failed"      (sim1 or sim2 rejected before submit)
+    """
+    entry = {
+        "entry_type": "summary",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "outcome": outcome,
+        "dry_run": dry_run,
+    }
+    if profit_pct is not None:
+        entry["profit_pct"] = str(profit_pct)
+    if net_profit_xrp is not None:
+        entry["net_profit_xrp"] = str(net_profit_xrp)
+    if leg1_hash is not None:
+        entry["leg1_hash"] = leg1_hash
+    if leg2_hash is not None:
+        entry["leg2_hash"] = leg2_hash
+    if error is not None:
+        entry["error"] = error
+    if extra:
+        entry.update(extra)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except OSError as e:
+        logger.error(f"Failed to write summary log: {e}")
