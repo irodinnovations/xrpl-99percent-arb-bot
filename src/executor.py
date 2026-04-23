@@ -48,6 +48,19 @@ BURN_FEE_DROPS = "12"
 NETWORK_FEE_DROPS = "12"
 LEG2_INTERMEDIATE_BUFFER = Decimal("1.005")  # 0.5% buffer on leg-2 SendMax
 
+# Leg-1 Amount ceiling multiplier (Codex audit 2026-04-23, Finding #1).
+# The Amount field on leg 1 is an UPPER BOUND on the IOU we receive under
+# tfPartialPayment. Previously we set it equal to input_xrp — but input_xrp
+# is the XRP count and not dimensionally comparable to an IOU value. For
+# any currency where 1 IOU != 1 XRP (SOLO, EUR, USDT, etc.) this clipped
+# leg-1 delivery to a tiny fraction of what the path could actually deliver.
+# Symptom: leg-2 sim repeatedly returns tecPATH_PARTIAL because it expects
+# more intermediate than leg 1 actually produces.
+# Fix: use a very generous ceiling so the ceiling never binds. SendMax on
+# leg 1 (XRP drops, input_xrp * 1.01) is the real cap on how much XRP we
+# spend; Amount just needs to be "bigger than any realistic delivery".
+LEG1_AMOUNT_BUFFER_MULTIPLIER = Decimal("1000")
+
 
 def _extract_intermediate(opp: Opportunity) -> tuple[str, str]:
     """Return (currency_code, issuer_address) of the IOU used to hop.
@@ -312,21 +325,31 @@ class TradeExecutor:
         submitted leg for post-incident diagnosis.
 
         Amount.value is an UPPER BOUND: tfPartialPayment delivers
-        min(Amount, path-capacity). For leg 1 we don't know the exact
-        delivered IOU value in advance (pathfinder's quote is a different
-        ledger snapshot), so we use `input_xrp` as a GENEROUS numeric
-        ceiling and let the path determine the real delivered amount.
-        The real delivered IOU is read from sim1.meta.delivered_amount
-        in `_extract_sim_delivered` and then used to size leg-2 SendMax.
-        If this placeholder is ever misread as an exact delivery target,
-        audit the tx hash + sim meta to find the true delivered value.
-        The `test_atomic_all_amounts_are_decimal` test verifies the
-        Decimal invariant across every field in both tx dicts.
+        min(Amount, path-capacity). We cap how much XRP we actually spend
+        via SendMax (input_xrp * 1.01 in drops). The Amount.value ceiling
+        just needs to be "larger than any realistic IOU delivery" so it
+        never binds — if it bound, we would under-deliver IOU and leg 2
+        would see less intermediate than its math expects.
+
+        Prior bug (Codex audit 2026-04-23 Finding #1): this field used
+        `input_xrp` as the numeric ceiling. `input_xrp` is the XRP count,
+        not an IOU value — setting an IOU ceiling equal to the XRP count
+        severely clipped delivery whenever 1 IOU != 1 XRP (SOLO at ~0.3
+        XRP/unit, EUR at ~2 XRP/unit, etc.). Symptom was leg-2 sim
+        rejecting with tecPATH_PARTIAL on almost every opportunity.
+
+        Fix: multiply by LEG1_AMOUNT_BUFFER_MULTIPLIER (1000x) so the
+        ceiling is always above the path's delivery capacity. SendMax
+        stays the true cap on XRP spent. The real delivered IOU is read
+        from sim1.meta.delivered_amount in `_extract_sim_delivered` and
+        used to size leg-2 SendMax.
         """
         send_max_drops = str(int(
             opportunity.input_xrp * DROPS_PER_XRP * Decimal("1.01")
         ))
-        estimated_iou_value = str(opportunity.input_xrp)
+        estimated_iou_value = str(
+            opportunity.input_xrp * LEG1_AMOUNT_BUFFER_MULTIPLIER
+        )
         return {
             "TransactionType": "Payment",
             "Account": self.wallet.address,

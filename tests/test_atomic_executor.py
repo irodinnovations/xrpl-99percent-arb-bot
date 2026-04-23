@@ -655,3 +655,90 @@ def test_extract_intermediate_raises_on_xrp_only_paths():
     )
     with pytest.raises(ValueError):
         _extract_intermediate(opp)
+
+
+# ============================================================================
+# Codex audit 2026-04-23 Finding #1 — leg-1 Amount ceiling regression guard
+# ============================================================================
+
+
+@pytest.mark.asyncio
+@patch("src.executor.log_trade_summary", new_callable=AsyncMock)
+@patch("src.executor.log_trade_leg", new_callable=AsyncMock)
+@patch("src.executor.send_alert", new_callable=AsyncMock)
+async def test_leg1_amount_ceiling_is_generous_not_input_xrp(
+    mock_alert, mock_log_leg, mock_log_summary,
+    mock_wallet, mock_circuit_breaker, mock_blacklist,
+    atomic_opportunity, mock_ws_connection,
+):
+    """Leg-1 Amount.value must be a GENEROUS ceiling, not equal to input_xrp.
+
+    The prior bug: Amount.value = str(input_xrp). input_xrp is the XRP count;
+    setting it as an IOU-value ceiling clipped leg-1 delivery whenever 1 IOU
+    was not priced 1:1 with XRP (i.e. always — SOLO ~0.3 XRP/unit, EUR ~2
+    XRP/unit, etc.). Downstream effect: leg-2 sim returned tecPATH_PARTIAL
+    because it expected more intermediate than leg 1 actually produced.
+
+    Fix (Codex audit Finding #1): multiply input_xrp by LEG1_AMOUNT_BUFFER_
+    MULTIPLIER (1000x) so the ceiling is always above the path's delivery
+    capacity. SendMax (XRP drops, input_xrp * 1.01) remains the true cap
+    on XRP spent — Amount is only a "don't clip" guard.
+
+    This test decodes the signed leg-1 tx_blob and asserts:
+      Amount.value > input_xrp   (proves multiplier applied)
+    A hardcoded equality check (Amount.value == input_xrp) would be the
+    regression. A value >= input_xrp * 100 confirms a generous ceiling.
+    """
+    mock_ws_connection.responses = {
+        "account_info": [
+            account_info_response(sequence=100, ledger=99000000),
+            account_info_response(sequence=100, ledger=99000000),
+        ],
+        "simulate": [
+            simulate_response("tesSUCCESS", delivered_iou="5.05"),
+            simulate_response("tesSUCCESS"),
+        ],
+        "submit": [
+            submit_response("tesSUCCESS", "LEG1HASH"),
+            submit_response("tesSUCCESS", "LEG2HASH"),
+        ],
+    }
+
+    executor = TradeExecutor(
+        wallet=mock_wallet,
+        circuit_breaker=mock_circuit_breaker,
+        blacklist=mock_blacklist,
+        connection=mock_ws_connection,
+        dry_run=False,
+    )
+    await executor.execute(atomic_opportunity)
+
+    from xrpl.core.binarycodec import decode as xrpl_decode
+    submits = [c for c in mock_ws_connection.send_raw_call_log if c["command"] == "submit"]
+    # First submit is leg 1
+    leg1_decoded = xrpl_decode(submits[0]["tx_blob"])
+
+    # Amount on leg 1 should be an IssuedCurrencyAmount (IOU), not XRP drops
+    amount = leg1_decoded.get("Amount")
+    assert isinstance(amount, dict), f"Leg-1 Amount must be IOU dict, got {type(amount)}"
+
+    # Value should be well above input_xrp. atomic_opportunity.input_xrp is
+    # a small Decimal (typically 1-10 XRP range); after multiplier of 1000
+    # the ceiling is 1000-10000 — enormous compared to any realistic IOU
+    # delivery on a 1-10 XRP trade.
+    value = Decimal(amount["value"])
+    input_xrp = Decimal(str(atomic_opportunity.input_xrp))
+
+    # Regression guard: value MUST exceed input_xrp — if we see equality,
+    # the bug is back.
+    assert value > input_xrp, (
+        f"Leg-1 Amount.value ({value}) must be > input_xrp ({input_xrp}). "
+        f"Equality is the pre-fix bug signature."
+    )
+
+    # Positive check: value should be generous (>= 100x input_xrp)
+    assert value >= input_xrp * Decimal("100"), (
+        f"Leg-1 Amount.value ({value}) is not generous enough "
+        f"(expected >= 100x input_xrp={input_xrp}). Ceiling may bind on "
+        f"deep paths for low-priced IOUs (e.g. SOLO at 0.3 XRP/unit)."
+    )
