@@ -174,13 +174,21 @@ async def main():
                 if scan_count % 5 == 0:
                     global_vol = volatility_tracker.get_global_volatility()
                     diag = volatility_tracker.get_diagnostics()
+                    ex_diag = executor.get_diagnostics()
                     logger.info(
                         f"Heartbeat: ledger={ledger_index}, scans={scan_count}, "
                         f"balance={balance} XRP, volatility={global_vol:.4f}, "
                         f"halted={circuit_breaker.is_halted()} | "
                         f"bookChanges msgs={diag['msgs_processed']}, "
                         f"recorded={diag['changes_recorded']}, "
-                        f"currencies={diag['currencies_tracked']}"
+                        f"currencies={diag['currencies_tracked']} | "
+                        f"exec calls={ex_diag['execute_calls']}, "
+                        f"ok={ex_diag['success']}, "
+                        f"leg1_reject={ex_diag['gate_leg1_sim_reject']}, "
+                        f"leg2_reject={ex_diag['gate_leg2_sim_reject']}, "
+                        f"no_intermediate={ex_diag['gate_no_intermediate']}, "
+                        f"single_writer={ex_diag['single_writer_violation']}, "
+                        f"leg2_submit_fail={ex_diag['leg2_submit_fail']}"
                     )
 
             except Exception as e:
