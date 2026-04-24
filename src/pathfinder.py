@@ -729,6 +729,11 @@ class PathFinder:
                 f"Targeted scan found {len(all_opps)} opportunities "
                 f"in {changed_currencies}"
             )
+        else:
+            logger.info(
+                f"Targeted scan found 0 opportunities in {changed_currencies} "
+                f"(tracked IOUs={len(target_lines)})"
+            )
 
         return _deduplicate_opportunities(all_opps)
 
@@ -786,7 +791,7 @@ class PathFinder:
             multi_hop_opps = await self._discover_multi_hop(mid_position, vf)
             all_opps.extend(multi_hop_opps)
 
-        logger.debug(
+        logger.info(
             f"Scan complete: {len(all_rates)} IOUs, {rated_count} with books, "
             f"{amm_count} with AMM, {len(all_opps)} opportunities"
         )

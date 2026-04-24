@@ -47,6 +47,10 @@ TF_PARTIAL_PAYMENT = 131072  # tfPartialPayment — required on XRP path payment
 BURN_FEE_DROPS = "12"
 NETWORK_FEE_DROPS = "12"
 LEG2_INTERMEDIATE_BUFFER = Decimal("1.005")  # 0.5% buffer on leg-2 SendMax
+# Leg-1 Amount must be a ceiling (tfPartialPayment); too low caps delivered IOU
+# and causes leg-2 sim to fail with tecPATH_PARTIAL even when the path is valid.
+# Use a generous multiplier to avoid clipping for sub-1 XRP/IOU assets.
+LEG1_AMOUNT_BUFFER_MULTIPLIER = Decimal("1000")
 
 # Leg-1 Amount ceiling multiplier (Codex audit 2026-04-23, Finding #1).
 # The Amount field on leg 1 is an UPPER BOUND on the IOU we receive under
@@ -106,6 +110,30 @@ class TradeExecutor:
         self.dry_run = dry_run
         # Single-writer lock — asserts only one atomic execute at a time.
         self._submit_lock = asyncio.Lock()
+        # Diagnostics counters to make "no trades" root-cause observable.
+        self._diag: dict[str, int] = {
+            "execute_calls": 0,
+            "success": 0,
+            "skip_halted": 0,
+            "skip_blacklist": 0,
+            "gate_no_account_state": 0,
+            "gate_no_intermediate": 0,
+            "gate_leg1_sim_reject": 0,
+            "gate_leg2_sim_reject": 0,
+            "single_writer_violation": 0,
+            "leg1_terminal_fail": 0,
+            "leg2_submit_fail": 0,
+        }
+        self._diag_leg1_codes: dict[str, int] = {}
+        self._diag_leg2_codes: dict[str, int] = {}
+
+    def get_diagnostics(self) -> dict:
+        """Return a snapshot of executor-level trade gate outcomes."""
+        return {
+            **self._diag,
+            "leg1_codes": dict(self._diag_leg1_codes),
+            "leg2_codes": dict(self._diag_leg2_codes),
+        }
 
     async def execute(self, opportunity: Opportunity) -> bool:
         """Run an opportunity through the atomic two-leg pipeline.
@@ -114,17 +142,21 @@ class TradeExecutor:
         tesSUCCESS / terPRE_SEQ acceptance. A leg-1-burn or leg-2-recovery path
         returns False.
         """
+        self._diag["execute_calls"] += 1
         # --- Gate 1: circuit breaker + blacklist (unchanged) ---
         if self.circuit_breaker.is_halted():
+            self._diag["skip_halted"] += 1
             logger.warning("Circuit breaker HALTED — skipping trade")
             return False
         if self.blacklist.is_blacklisted(opportunity.paths):
+            self._diag["skip_blacklist"] += 1
             logger.warning("Path is blacklisted — skipping trade")
             return False
 
         # --- Gate 2: account_info ONCE for both legs (Pitfall 2 mitigation) ---
         acct = await self._fetch_account_state()
         if acct is None:
+            self._diag["gate_no_account_state"] += 1
             logger.error("Could not fetch account_info — aborting")
             return False
         sequence_n, ledger_current_index = acct
@@ -134,6 +166,7 @@ class TradeExecutor:
         try:
             intermediate_currency, intermediate_issuer = _extract_intermediate(opportunity)
         except ValueError as e:
+            self._diag["gate_no_intermediate"] += 1
             logger.warning(f"Cannot split opportunity into legs: {e}")
             await log_trade_summary(
                 outcome="pre_submit_gate_failed", dry_run=self.dry_run,
@@ -152,6 +185,10 @@ class TradeExecutor:
         # Leg 1 sim runs BEFORE leg 2 build — we need sim1's delivered_amount
         sim1 = await self._simulate(leg1)
         if not is_acceptable_sim_result(sim1.result_code, is_leg_2=False):
+            self._diag["gate_leg1_sim_reject"] += 1
+            self._diag_leg1_codes[sim1.result_code] = (
+                self._diag_leg1_codes.get(sim1.result_code, 0) + 1
+            )
             logger.warning(f"Leg 1 sim rejected: {sim1.result_code}")
             await log_trade_summary(
                 outcome="pre_submit_gate_failed", dry_run=self.dry_run,
@@ -170,6 +207,10 @@ class TradeExecutor:
         )
         sim2 = await self._simulate(leg2)
         if not is_acceptable_sim_result(sim2.result_code, is_leg_2=True):
+            self._diag["gate_leg2_sim_reject"] += 1
+            self._diag_leg2_codes[sim2.result_code] = (
+                self._diag_leg2_codes.get(sim2.result_code, 0) + 1
+            )
             logger.warning(f"Leg 2 sim rejected: {sim2.result_code}")
             await log_trade_summary(
                 outcome="pre_submit_gate_failed", dry_run=self.dry_run,
@@ -198,6 +239,7 @@ class TradeExecutor:
             # Single-writer guard (ATOM-06) — re-read Sequence immediately before submit
             acct2 = await self._fetch_account_state()
             if acct2 is None or acct2[0] != sequence_n:
+                self._diag["single_writer_violation"] += 1
                 actual = acct2[0] if acct2 else None
                 logger.error(
                     f"Single-writer violation: Sequence drift "
@@ -228,6 +270,7 @@ class TradeExecutor:
 
             # Leg 1 terminal failure (tec/tef/tem) -> burn Sequence N+1
             if _is_terminal_failure(leg1_engine):
+                self._diag["leg1_terminal_fail"] += 1
                 burn_hash, burn_ok = await self._burn_sequence(
                     sequence_n + 1, last_ledger,
                 )
@@ -257,6 +300,7 @@ class TradeExecutor:
 
             # Leg 2 failed after leg 1 committed -> preserve 2% recovery (ATOM-05)
             if leg2_engine != "tesSUCCESS":
+                self._diag["leg2_submit_fail"] += 1
                 est_loss = -(opportunity.input_xrp * Decimal("0.025"))
                 self.circuit_breaker.record_trade(est_loss)
                 await log_trade_summary(
@@ -286,6 +330,7 @@ class TradeExecutor:
                 f"ATOMIC TRADE OK: {opportunity.profit_pct:.4f}% | "
                 f"leg1={leg1_hash} leg2={leg2_hash} | latency={latency_ms}ms"
             )
+            self._diag["success"] += 1
             return True
 
     # --- Helpers ------------------------------------------------------------
