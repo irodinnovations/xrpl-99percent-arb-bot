@@ -205,3 +205,87 @@ async def test_simulate_ws_tessuccess_accepted_by_both_helpers():
     assert result.success is True
     assert is_acceptable_sim_result(result.result_code, is_leg_2=True) is True
     assert is_acceptable_sim_result(result.result_code, is_leg_2=False) is True
+
+
+# ============================================================================
+# WS error → HTTP fallback regression guard (production rpc_error fix 2026-04-25)
+# ============================================================================
+#
+# Bug: WS simulate returned SimResult(result_code="rpc_error") whenever the
+# response had an "error" field set. This happens consistently in production
+# due to xrpl-py's "Request RequestMethod.X is already in progress" race
+# condition on concurrent WS requests sharing the same internal request ID.
+# The executor's diagnostics (PR #21) revealed 100% of leg-1 sim failures
+# were rpc_error, dropping every opportunity in the 27-hour window after
+# atomic deployment.
+#
+# Fix: when WS returns an error response, fall back to HTTP simulate (same
+# pattern already used for None responses and exceptions).
+
+
+@pytest.mark.asyncio
+async def test_simulate_ws_error_falls_back_to_http():
+    """WS error response must fall back to HTTP, not return rpc_error.
+
+    Previously: error in raw_response -> return SimResult(rpc_error). This
+    silently dropped opportunities whenever xrpl-py's WS request manager hit
+    a request-ID collision (which it does often under load).
+    """
+    from unittest.mock import AsyncMock, patch
+    from src.simulator import simulate_transaction_ws
+
+    # WS connection that returns an error response (collision scenario)
+    mock_connection = MagicMock()
+    mock_connection.send_raw = AsyncMock(return_value={
+        "error": "Request RequestMethod.SIMULATE_99999 is already in progress.",
+    })
+
+    # HTTP fallback returns a successful sim — the fallback should be hit
+    # and its result returned, NOT rpc_error.
+    fallback_result = SimResult(
+        success=True,
+        result_code="tesSUCCESS",
+        raw={"engine_result": "tesSUCCESS"},
+    )
+
+    with patch("src.simulator.simulate_transaction", new_callable=AsyncMock) as mock_http:
+        mock_http.return_value = fallback_result
+        result = await simulate_transaction_ws({"Account": "rTest"}, mock_connection)
+
+    # Fallback was invoked exactly once
+    mock_http.assert_called_once()
+
+    # Result is the HTTP fallback's result, not rpc_error
+    assert result.result_code == "tesSUCCESS"
+    assert result.success is True
+    # Hard regression guard: never return rpc_error on WS error path
+    assert result.result_code != "rpc_error"
+
+
+@pytest.mark.asyncio
+async def test_simulate_ws_error_falls_back_to_http_even_when_http_also_fails():
+    """If both WS and HTTP fail, the HTTP failure result is propagated.
+
+    Demonstrates the fallback is unconditional — we always try HTTP after
+    a WS error, and the caller sees whatever HTTP returns (success OR
+    failure). This is correct: even an HTTP-side rpc_error is more
+    informative than blindly trusting a stale WS race condition.
+    """
+    from unittest.mock import AsyncMock, patch
+    from src.simulator import simulate_transaction_ws
+
+    mock_connection = MagicMock()
+    mock_connection.send_raw = AsyncMock(return_value={
+        "error": "Request RequestMethod.SIMULATE_42 is already in progress.",
+    })
+
+    http_failure = SimResult(success=False, result_code="rpc_error",
+                             error="HTTP also failed")
+
+    with patch("src.simulator.simulate_transaction", new_callable=AsyncMock) as mock_http:
+        mock_http.return_value = http_failure
+        result = await simulate_transaction_ws({"Account": "rTest"}, mock_connection)
+
+    mock_http.assert_called_once()
+    # If HTTP also fails, propagating its result is correct behavior.
+    assert result.success is False
