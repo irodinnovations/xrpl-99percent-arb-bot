@@ -185,14 +185,21 @@ async def simulate_transaction_ws(
             logger.warning("WS simulate returned None — falling back to HTTP")
             return await simulate_transaction(tx_dict)
 
-        # Check for server-level error
+        # Server-level error response. This includes xrpl-py's internal
+        # "RequestMethod.X is already in progress" race condition where a
+        # request-ID collision aborts the call. We previously returned
+        # rpc_error here and dropped the opportunity, but the executor's
+        # diagnostics (PR #21) showed 100% of leg-1 sim failures were
+        # rpc_error — meaning every opportunity was lost to this path.
+        # Fall back to HTTP instead — HTTP uses a fresh connection and
+        # doesn't suffer from the WS request-ID collision problem.
         if "error" in raw_response:
             error_msg = raw_response.get("error", {})
-            return SimResult(
-                success=False,
-                result_code="rpc_error",
-                error=str(error_msg),
+            logger.warning(
+                f"WS simulate returned error ({error_msg}) — "
+                f"falling back to HTTP"
             )
+            return await simulate_transaction(tx_dict)
 
         result = raw_response.get("result", raw_response)
         tx_result = _extract_result_code(result)
